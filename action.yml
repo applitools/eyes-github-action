@@ -1,0 +1,125 @@
+name: Applitools visual review gate
+description: >-
+  Runs your Applitools Eyes tests and posts "Applitools / Visual tests" and "Applitools / Design review" checks on the
+  pull request, so nothing merges until visual changes are accepted in Eyes.
+author: Applitools
+branding:
+  icon: eye
+  color: blue
+
+inputs:
+  run:
+    description: 'Command that runs your Eyes tests (bash, like a `run:` step). Eyes is configured through APPLITOOLS_* environment variables.'
+    required: true
+  workingDirectory:
+    description: 'Directory to run the command in.'
+    required: false
+  apiKey:
+    description: 'Eyes run key (uploads tests, closes batches). Defaults to the APPLITOOLS_API_KEY environment variable.'
+    required: false
+  readApiKey:
+    description: 'Eyes read key (reads results and teams). Run keys usually can''t read results. Defaults to APPLITOOLS_READ_KEY, then the run key.'
+    required: false
+  serverUrl:
+    description: 'Eyes server, for dedicated clouds and on-prem.'
+    required: false
+    default: https://eyes.applitools.com
+  batchId:
+    description: 'Override the batch ID (default: the PR head commit SHA). Supports ${VAR}.'
+    required: false
+  batchName:
+    description: 'Override the batch name (default: "owner/repo PR #N: title"). Supports ${VAR}.'
+    required: false
+  branchName:
+    description: 'Override the Eyes branch (default owner/repo/source-branch). Supports ${VAR}.'
+    required: false
+  parentBranchName:
+    description: 'Override the Eyes parent branch (default owner/repo/target-branch). Supports ${VAR}.'
+    required: false
+  closeBatch:
+    description: 'Close the batch after the command.'
+    required: false
+    default: 'true'
+  waitForResults:
+    description: 'Wait for rendering and read results.'
+    required: false
+    default: 'true'
+  resultsTimeout:
+    description: 'Longest wait (seconds) for tests still rendering.'
+    required: false
+    default: '300'
+  onChanges:
+    description: 'What unreviewed changes do to this step: UNSTABLE (warning, step passes), FAILURE, or SUCCESS. The PR check is the gate either way.'
+    required: false
+    default: UNSTABLE
+  judgeDiffs:
+    description: 'Tell Eyes SDKs not to fail the command on visual diffs (APPLITOOLS_EXITCODE=nodiffs, APPLITOOLS_FAIL_CYPRESS_ON_DIFF=false).'
+    required: false
+    default: 'true'
+  expectTests:
+    description: 'Minimum number of Eyes tests the batch must contain.'
+    required: false
+  expectApps:
+    description: 'Eyes app names (comma or newline separated) that must each report at least one test.'
+    required: false
+  checks:
+    description: 'Post results to the pull request at all.'
+    required: false
+    default: 'true'
+  githubReporting:
+    description: 'CHECKS (check runs; needs `checks: write`) or STATUSES (commit statuses; needs `statuses: write`).'
+    required: false
+    default: CHECKS
+  githubToken:
+    description: 'Token used to post results.'
+    required: false
+    default: ${{ github.token }}
+  designReview:
+    description: 'true/false forces design review on or off. Empty = from the PR label, then designReviewByDefault.'
+    required: false
+  designReviewLabel:
+    description: 'PR label that requests design review.'
+    required: false
+    default: design-review
+  designers:
+    description: 'Who may approve design review, comma or newline separated: Eyes login emails and/or team:<Eyes team name or id>. Empty = anyone reviewing in Eyes.'
+    required: false
+  designReviewByDefault:
+    description: 'Every pull request needs design review.'
+    required: false
+    default: 'false'
+  designReviewCheck:
+    description: 'Post the Design review check (always, even when skipped, so it can be required).'
+    required: false
+    default: 'true'
+  repo:
+    description: 'Explicit owner/repo (default from the event).'
+    required: false
+  pullRequest:
+    description: 'Explicit PR number (default from the event).'
+    required: false
+  commit:
+    description: 'Explicit commit to post results on (default the PR head commit, never the merge commit).'
+    required: false
+  branch:
+    description: 'Explicit source branch (default from the event).'
+    required: false
+  targetBranch:
+    description: 'Explicit target branch (default from the event).'
+    required: false
+
+outputs:
+  outcome:
+    description: 'PASSED, CHANGES, FAILED or NO_RESULTS.'
+  summary:
+    description: 'One-line results summary.'
+  batchId:
+    description: 'The Eyes batch pointer ID.'
+  batchUrl:
+    description: 'Link to the batch in Eyes.'
+  designReview:
+    description: 'NOT_REQUESTED, WAITING, APPROVED or CHANGES_REQUESTED.'
+
+runs:
+  using: node24
+  main: dist/index.js
