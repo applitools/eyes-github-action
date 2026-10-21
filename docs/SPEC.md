@@ -34,7 +34,8 @@ Implementations SHOULD use these names (Jenkins step options / Action inputs) so
 | `closeBatch` | `true` | Close the batch when the gated block ends |
 | `waitForResults` | `true` | Wait for rendering and read results |
 | `resultsTimeout` | `300` s | Longest wait for tests still rendering |
-| `onChanges` | `UNSTABLE` | CI result when changes await review: `UNSTABLE` / `FAILURE` / `SUCCESS` |
+| `onChanges` | `SUCCESS` | CI result when changes await review: `SUCCESS` / `UNSTABLE` / `FAILURE`. Default green: the PR results are the gate, and a yellow/red build makes CI's own PR results read as failing |
+| `mergeBaselines` (per job) | global setting | Merge Eyes baselines when **this job's PR merges** (only then, never on approval) |
 | `judgeDiffs` | `true` | Tell SDKs not to fail the command on diffs (§9) |
 | `expectTests` | none | Minimum number of Eyes tests in the batch |
 | `expectApps` | none | Eyes app names that must each report at least one test |
@@ -92,14 +93,14 @@ Branch names MUST be `owner/repo/branch`: that's the format Eyes' SCM integratio
 
 ## 4. Lifecycle of one gated run
 
-1. **Start.** Resolve keys (fail with guidance if the run key is missing). Resolve PR context and batch identity. Set env (§3.3). Post Visual tests = *in progress*, "Running visual tests".
+1. **Start.** Resolve keys (fail with guidance if the run key is missing). Resolve PR context and batch identity. Set env (§3.3). Post Visual tests = *in progress*, "Running visual tests", and (if the Design review result is on) Design review = *in progress*, "Waiting for visual tests", so a re-run never shows the previous build's verdict.
 2. **Run tests** (user commands).
 3. **Close the batch:** `DELETE /api/sessions/batches/{batchId}/close/bypointerid`. `404` means no tests reported: results are "No Eyes results" (and an unmet `expectTests`/`expectApps` fails). Network errors only warn.
 4. **Wait for rendering:** poll `GET /api/sessions/batches/{batchId}/bypointerid` → `runningCount` every 5 s until 0 or `resultsTimeout`.
 5. **Read results:** `GET /api/v1/batches/{batchId}` (read key). `401`/`403` → "Couldn't read Eyes results" with a hint to add a read key.
 6. **Apply expectations** (§5.2), compute the **outcome** (§5.1).
 7. **Record** results for the CI UI; **post** Visual tests (§7); **evaluate and post** Design review (§6); **register** the review for following (§8).
-8. **Set the CI result:** always print the verdict line first (`<Outcome>: <summary> → <batch URL>`). Then FAILED → fail; CHANGES → `onChanges`; PASSED / NO_RESULTS → unchanged. The verdict MUST be printed before failing, because when the test command already failed, CI often reports only the first error.
+8. **Set the CI result:** always print the verdict line first (`<Outcome>: <summary> → <batch URL>`). Then FAILED → fail; CHANGES → `onChanges` (default: unchanged, i.e. green); PASSED / NO_RESULTS → unchanged. The build only fails when something really failed (rejected or aborted tests, missing results, crashed commands); waiting on reviewers is not a failure. The verdict MUST be printed before failing, because when the test command already failed, CI often reports only the first error.
 
 Problems talking to Eyes or GitHub MUST NOT fail the build by themselves; they're logged, and the PR result reflects them.
 
@@ -178,6 +179,7 @@ Three results, same names as checks or statuses:
 | Gate state | Check (status / conclusion) | Commit status |
 | --- | --- | --- |
 | Visual tests running | `in_progress` | `pending` |
+| Design review while this build's tests run | `in_progress` ("Waiting for visual tests"; a new check run per build, so allowed) | `pending` |
 | PASSED | `completed` / `success` | `success` |
 | CHANGES | `completed` / `action_required` | `pending` |
 | FAILED, NO_RESULTS, unreadable results | `completed` / `failure` | `failure` |
