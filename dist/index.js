@@ -38260,6 +38260,10 @@ async function runGate(config, deps) {
     }
     return { ...base, results, design, failure, warning };
 }
+/**
+ * Evaluates Design review against current results. At the end of a run every changed test is still unresolved; the
+ * approver lookups matter on later refreshes, once reviewers have acted in Eyes.
+ */
 async function evaluateDesign(config, inputs, results, changed, reader) {
     const required = isRequired(inputs);
     // Expand team: entries only when a review actually needs them.
@@ -38608,17 +38612,18 @@ function setOutputs(result) {
         setOutput('designReview', result.design.state);
 }
 async function writeJobSummary(result) {
+    // Markdown headings: an HTML heading swallows the markdown that follows it unless a blank line intervenes.
+    let md = '## Applitools\n\n';
+    if (result.results) {
+        md += `### ${OUTCOME_LABELS[outcome(result.results)]}\n\n${visualTestsSummary(result.results)}\n`;
+    }
+    else if (result.problem) {
+        md += `Couldn't read Eyes results: ${result.problem}\n\n`;
+    }
+    if (result.design)
+        md += `### Design review: ${result.design.title}\n\n${result.design.detail}\n`;
     try {
-        const s = summary.addHeading('Applitools', 2);
-        if (result.results) {
-            s.addHeading(`${OUTCOME_LABELS[outcome(result.results)]}`, 3).addRaw(visualTestsSummary(result.results), true);
-        }
-        else if (result.problem) {
-            s.addRaw(`Couldn't read Eyes results: ${result.problem}`, true);
-        }
-        if (result.design)
-            s.addHeading(`Design review: ${result.design.title}`, 3).addRaw(result.design.detail, true);
-        await s.write();
+        await summary.addRaw(md).write();
     }
     catch (e) {
         core_debug(`Could not write the job summary: ${e}`);

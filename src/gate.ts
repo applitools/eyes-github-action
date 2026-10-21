@@ -203,8 +203,12 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
   return {...base, results, design, failure, warning}
 }
 
-async function evaluateDesign(
-  config: GateConfig,
+/**
+ * Evaluates Design review against current results. At the end of a run every changed test is still unresolved; the
+ * approver lookups matter on later refreshes, once reviewers have acted in Eyes.
+ */
+export async function evaluateDesign(
+  config: Pick<GateConfig, 'designers' | 'designReviewLabel'>,
   inputs: DesignInputs,
   results: BatchResults,
   changed: string[],
