@@ -38220,7 +38220,7 @@ async function runGate(config, deps) {
     const designInputs = {
         option: config.designReview,
         env: parseBool(deps.env[ENV_DESIGN_REVIEW]),
-        labelPresent: labelPresent(scm, config.designReviewLabel),
+        labelPresent: labelPresent({ ...scm, labels: (await currentLabels(deps, log)) ?? scm.labels }, config.designReviewLabel),
         byDefault: config.designReviewByDefault
     };
     const visual = visualTestsCompleted(results);
@@ -38327,6 +38327,15 @@ async function collect(eyes, batchId, timeoutSeconds, log, sleep, pollMs) {
         }
         log.warning(`Could not read results for batch ${batchId}: ${message(e)}`);
         return { problem: `Couldn't reach Eyes to read results: ${message(e)}` };
+    }
+}
+async function currentLabels(deps, log) {
+    try {
+        return await deps.currentLabels?.();
+    }
+    catch (e) {
+        log.warning(`Could not read pull request labels, using the event's: ${message(e)}`);
+        return undefined;
     }
 }
 function labelPresent(scm, label) {
@@ -38542,6 +38551,7 @@ async function main() {
         const scm = withOverrides(eventScm, inputs.config.scm);
         const logUrl = `${github_context.serverUrl}/${github_context.repo.owner}/${github_context.repo.repo}/actions/runs/${github_context.runId}`;
         let reporter;
+        const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined;
         if (inputs.config.checks) {
             if (!inputs.githubToken) {
                 warning('No githubToken, so results will not be posted to the pull request.');
@@ -38550,7 +38560,7 @@ async function main() {
                 warning('Repository or commit unknown; results will not be posted. Set `repo:` and `commit:`.');
             }
             else {
-                reporter = new GitHubReporter(getOctokit(inputs.githubToken), scm.owner, scm.repo, scm.commitSha, inputs.githubReporting);
+                reporter = new GitHubReporter(octokit, scm.owner, scm.repo, scm.commitSha, inputs.githubReporting);
             }
         }
         const result = await runGate(inputs.config, {
@@ -38561,6 +38571,12 @@ async function main() {
             env: process.env,
             scm: eventScm,
             fallbackLabel: `${github_context.workflow} #${github_context.runNumber}`,
+            currentLabels: async () => {
+                if (!octokit || !scm.owner || !scm.repo || scm.prNumber === undefined)
+                    return undefined;
+                const pr = await octokit.rest.pulls.get({ owner: scm.owner, repo: scm.repo, pull_number: scm.prNumber });
+                return pr.data.labels.map(l => l.name);
+            },
             logUrl
         });
         setOutputs(result);

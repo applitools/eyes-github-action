@@ -78,6 +78,8 @@ export interface GateDeps {
   scm: ScmInfo
   /** Names the batch when there's no SCM info. */
   fallbackLabel: string
+  /** Current PR labels, read when the tests finish (a label added mid-run counts); undefined falls back to the event. */
+  currentLabels?(): Promise<string[] | undefined>
   /** Link to this workflow run, for check summaries. */
   logUrl?: string
   sleep?(ms: number): Promise<void>
@@ -164,7 +166,7 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
   const designInputs: DesignInputs = {
     option: config.designReview,
     env: parseBool(deps.env[ENV_DESIGN_REVIEW]),
-    labelPresent: labelPresent(scm, config.designReviewLabel),
+    labelPresent: labelPresent({...scm, labels: (await currentLabels(deps, log)) ?? scm.labels}, config.designReviewLabel),
     byDefault: config.designReviewByDefault
   }
   const visual = visualTestsCompleted(results)
@@ -289,6 +291,15 @@ async function collect(
     }
     log.warning(`Could not read results for batch ${batchId}: ${message(e)}`)
     return {problem: `Couldn't reach Eyes to read results: ${message(e)}`}
+  }
+}
+
+async function currentLabels(deps: GateDeps, log: Logger): Promise<string[] | undefined> {
+  try {
+    return await deps.currentLabels?.()
+  } catch (e) {
+    log.warning(`Could not read pull request labels, using the event's: ${message(e)}`)
+    return undefined
   }
 }
 

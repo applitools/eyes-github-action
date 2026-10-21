@@ -134,6 +134,19 @@ describe('runGate', () => {
     expect(last('Applitools / Design review')).toMatchObject({conclusion: 'skipped', title: 'Not requested'})
   })
 
+  it('reads labels when the tests finish, so a label added mid-run counts', async () => {
+    eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'unresolved'}]})
+    await runGate(config(), deps({scm: {...scm, labels: []}, currentLabels: async () => ['Design-Review']}))
+    expect(last('Applitools / Design review')!.title).toBe('Waiting for design review')
+  })
+
+  it("falls back to the event's labels when the PR can't be read", async () => {
+    eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'unresolved'}]})
+    await runGate(config(), deps({currentLabels: async () => Promise.reject(new Error('HTTP 403'))}))
+    expect(last('Applitools / Design review')!.title).toBe('Waiting for design review')
+    expect(logs.some(l => l.includes("Could not read pull request labels"))).toBe(true)
+  })
+
   it('honours APPLITOOLS_DESIGN_REVIEW over the label and records it as forced', async () => {
     eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'unresolved'}]})
     await runGate(config(), deps({env: {APPLITOOLS_DESIGN_REVIEW: 'false'}}))

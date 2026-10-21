@@ -20,6 +20,7 @@ export async function main(): Promise<void> {
     const logUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
 
     let reporter: Reporter | undefined
+    const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined
     if (inputs.config.checks) {
       if (!inputs.githubToken) {
         core.warning('No githubToken, so results will not be posted to the pull request.')
@@ -27,7 +28,7 @@ export async function main(): Promise<void> {
         core.warning('Repository or commit unknown; results will not be posted. Set `repo:` and `commit:`.')
       } else {
         reporter = new GitHubReporter(
-          getOctokit(inputs.githubToken),
+          octokit!,
           scm.owner,
           scm.repo,
           scm.commitSha,
@@ -44,6 +45,11 @@ export async function main(): Promise<void> {
       env: process.env,
       scm: eventScm,
       fallbackLabel: `${context.workflow} #${context.runNumber}`,
+      currentLabels: async () => {
+        if (!octokit || !scm.owner || !scm.repo || scm.prNumber === undefined) return undefined
+        const pr = await octokit.rest.pulls.get({owner: scm.owner, repo: scm.repo, pull_number: scm.prNumber})
+        return pr.data.labels.map(l => l.name)
+      },
       logUrl
     })
 
