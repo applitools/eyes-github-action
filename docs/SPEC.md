@@ -209,8 +209,9 @@ The point of the gate is that results update when reviewers act in Eyes, with no
 
 - Each PR build is registered: job, build, batch ID, server, key IDs, PR (repo + number), design settings, changed test IDs, expectations, label state, last posted states, and GitHub connection (token jobs).
 - **One per job/PR:** a newer build replaces the older.
-- **Branch builds** stop being followed once **settled**: no visual changes pending and design not waiting.
-- **Open PRs** stay followed when settled (no Eyes polling), because a label change or the merge can still affect them.
+- **Branch builds are not followed** by default (opt-in `followBranchBuilds`): nobody reviews them, so they'd never settle. When followed, they stop once **settled**.
+- **Open PRs** stay followed when settled, because a label change or the merge can still affect them, and a reviewer can change their mind in Eyes (re-read every 30 min).
+- **Reconciliation on every pass** (no network in the common case): drop when the build is deleted, the job is gone or disabled (closed PR / deleted branch), or the job has a newer finished build. Before dropping a closed PR, **ask GitHub whether it merged**, and if so run the baseline merge (covers missed webhooks). If GitHub can't be reached, retry next pass instead of dropping.
 - Dropped when: the PR closes (or merges and its baseline merge succeeds), the build is deleted, after **14 days**, or past a **cap of 500** (oldest first).
 
 ### 8.2 Refresh
