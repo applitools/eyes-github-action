@@ -8,9 +8,13 @@ branding:
   color: blue
 
 inputs:
+  mode:
+    description: '`run` (default): run the tests and post the checks. `refresh`: run no tests; re-read Eyes for the event''s pull request, `pullRequest`, or every open PR, and update the checks that changed.'
+    required: false
+    default: 'run'
   run:
-    description: 'Command that runs your Eyes tests (bash, like a `run:` step). Eyes is configured through APPLITOOLS_* environment variables.'
-    required: true
+    description: 'Command that runs your Eyes tests (bash, like a `run:` step). Eyes is configured through APPLITOOLS_* environment variables. Required with `mode: run`.'
+    required: false
   workingDirectory:
     description: 'Directory to run the command in.'
     required: false

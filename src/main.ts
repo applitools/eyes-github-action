@@ -4,11 +4,12 @@ import {context, getOctokit} from '@actions/github'
 import {mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import path from 'node:path'
-import {scmFromEvent, withOverrides} from './context.js'
+import {ScmInfo, scmFromEvent, withOverrides} from './context.js'
 import {EyesClient} from './eyes.js'
 import {GateResult, runGate} from './gate.js'
-import {GitHubReporter, Reporter} from './github.js'
-import {readInputs} from './inputs.js'
+import {GitHubRefresh, GitHubReporter, Reporter} from './github.js'
+import {ActionInputs, readInputs} from './inputs.js'
+import {describeRefresh, runRefresh} from './refresh.js'
 import {OUTCOME_LABELS, outcome, summary} from './results.js'
 import {visualTestsSummary} from './checks.js'
 
@@ -17,6 +18,7 @@ export async function main(): Promise<void> {
     const inputs = readInputs()
     const eventScm = scmFromEvent(context)
     const scm = withOverrides(eventScm, inputs.config.scm)
+    if (inputs.mode === 'REFRESH') return await refresh(inputs, scm)
     const logUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
 
     let reporter: Reporter | undefined
@@ -38,7 +40,7 @@ export async function main(): Promise<void> {
     }
 
     const result = await runGate(inputs.config, {
-      runCommand: env => runCommand(inputs.run, inputs.workingDirectory, env),
+      runCommand: env => runCommand(inputs.run!, inputs.workingDirectory, env),
       eyes: key => new EyesClient(inputs.config.serverUrl, key),
       reporter,
       log: {info: m => core.info(m), warning: m => core.warning(m)},
@@ -59,6 +61,28 @@ export async function main(): Promise<void> {
     if (result.failure) core.setFailed(result.failure)
   } catch (e) {
     core.setFailed(e instanceof Error ? e.message : String(e))
+  }
+}
+
+/** `mode: refresh`: the event's PR (or `pullRequest`), otherwise every open PR. No tests run. */
+async function refresh(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
+  if (!inputs.githubToken) throw new Error('`mode: refresh` needs githubToken (the default is fine).')
+  if (!scm.owner || !scm.repo) throw new Error('Repository unknown; set `repo:`.')
+  const outcomes = await runRefresh(
+    inputs.config,
+    {
+      github: new GitHubRefresh(getOctokit(inputs.githubToken), scm.owner, scm.repo),
+      eyes: key => new EyesClient(inputs.config.serverUrl, key),
+      log: {info: m => core.info(m), warning: m => core.warning(m)},
+      env: process.env
+    },
+    scm.prNumber
+  )
+  const lines = outcomes.map(o => `- ${describeRefresh(o)}`)
+  try {
+    await core.summary.addRaw(`## Applitools refresh\n\n${lines.join('\n') || 'No open pull requests.'}\n`).write()
+  } catch (e) {
+    core.debug(`Could not write the job summary: ${e}`)
   }
 }
 

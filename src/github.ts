@@ -5,7 +5,8 @@
  */
 import * as core from '@actions/core'
 import {getOctokit} from '@actions/github'
-import {CheckResult, toStatus} from './checks.js'
+import {CheckResult, DESIGN_REVIEW, VISUAL_TESTS, toStatus} from './checks.js'
+import {PostedCheck, PullRequest, RefreshGitHub} from './refresh.js'
 
 export type Reporting = 'CHECKS' | 'STATUSES'
 
@@ -67,6 +68,82 @@ export class GitHubReporter implements Reporter {
     } catch (e) {
       core.warning(`Could not publish '${result.name}': ${describeError(e)}`)
     }
+  }
+}
+
+/** Reads PRs and check runs and updates checks for a refresh. Unlike publishing, errors are thrown to the caller. */
+export class GitHubRefresh implements RefreshGitHub {
+  constructor(
+    private readonly octokit: Octokit,
+    private readonly owner: string,
+    private readonly repo: string
+  ) {}
+
+  async pullRequests(only?: number): Promise<PullRequest[]> {
+    const {owner, repo} = this
+    const toRef = (pr: {number: number; head: {sha: string}; labels: {name?: string}[]}): PullRequest => ({
+      number: pr.number,
+      headSha: pr.head.sha,
+      labels: pr.labels.flatMap(l => (l.name ? [l.name] : []))
+    })
+    if (only !== undefined) {
+      const {data} = await this.octokit.rest.pulls.get({owner, repo, pull_number: only})
+      return data.state === 'open' ? [toRef(data)] : []
+    }
+    const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, {owner, repo, state: 'open', per_page: 100})
+    return prs.map(toRef)
+  }
+
+  async checks(sha: string): Promise<PostedCheck[]> {
+    const runs = []
+    for (const name of [VISUAL_TESTS, DESIGN_REVIEW]) {
+      const {data} = await this.octokit.rest.checks.listForRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: sha,
+        check_name: name,
+        filter: 'all',
+        per_page: 100
+      })
+      runs.push(...data.check_runs)
+    }
+    return runs.map(r => ({
+      id: r.id,
+      name: r.name,
+      appId: r.app?.id,
+      status: r.status,
+      conclusion: r.conclusion,
+      title: r.output.title,
+      summary: r.output.summary
+    }))
+  }
+
+  async update(id: number, result: CheckResult): Promise<void> {
+    await this.octokit.rest.checks.update({
+      owner: this.owner,
+      repo: this.repo,
+      check_run_id: id,
+      status: 'completed',
+      conclusion: result.conclusion,
+      completed_at: new Date().toISOString(),
+      details_url: result.detailsUrl,
+      output: {title: result.title, summary: truncate(result.summary)}
+    })
+  }
+
+  async create(sha: string, result: CheckResult, externalId: string): Promise<void> {
+    await this.octokit.rest.checks.create({
+      owner: this.owner,
+      repo: this.repo,
+      head_sha: sha,
+      name: result.name,
+      status: 'completed',
+      conclusion: result.conclusion,
+      completed_at: new Date().toISOString(),
+      details_url: result.detailsUrl,
+      external_id: externalId,
+      output: {title: result.title, summary: truncate(result.summary)}
+    })
   }
 }
 

@@ -4,8 +4,12 @@ import {parseDesigners} from './designers.js'
 import {ChangesPolicy, GateConfig, parseBool} from './gate.js'
 import {Reporting} from './github.js'
 
+export type Mode = 'RUN' | 'REFRESH'
+
 export interface ActionInputs {
-  run: string
+  mode: Mode
+  /** The test command; only in RUN mode. */
+  run?: string
   workingDirectory?: string
   githubToken?: string
   githubReporting: Reporting
@@ -13,25 +17,34 @@ export interface ActionInputs {
 }
 
 export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
-  const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY
+  const mode = oneOf<Mode>('mode', ['RUN', 'REFRESH'], 'RUN')
+  const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY
+  // A refresh only reads, so the read key is enough.
+  const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : undefined)
   if (!apiKey) {
     throw new Error(
-      'No Eyes API key. Pass `apiKey: ${{ secrets.APPLITOOLS_API_KEY }}` to the action ' +
-        '(or set APPLITOOLS_API_KEY in the step environment).'
+      mode === 'REFRESH'
+        ? 'No Eyes read key. Pass `readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}` to the action.'
+        : 'No Eyes API key. Pass `apiKey: ${{ secrets.APPLITOOLS_API_KEY }}` to the action ' +
+            '(or set APPLITOOLS_API_KEY in the step environment).'
     )
   }
-  const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY
   core.setSecret(apiKey)
   if (readApiKey) core.setSecret(readApiKey)
 
   const run = input('run')
-  if (!run) throw new Error('`run` is required: the command that runs your Eyes tests.')
+  if (mode === 'RUN' && !run) throw new Error('`run` is required: the command that runs your Eyes tests.')
+  const githubReporting = oneOf<Reporting>('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS')
+  if (mode === 'REFRESH' && githubReporting === 'STATUSES') {
+    throw new Error('`mode: refresh` needs check runs (the run state lives in them); remove `githubReporting: STATUSES`.')
+  }
 
   return {
+    mode,
     run,
     workingDirectory: input('workingDirectory'),
     githubToken: input('githubToken'),
-    githubReporting: oneOf('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS'),
+    githubReporting,
     config: {
       apiKey,
       readApiKey,

@@ -11,7 +11,7 @@ Make both required checks, and nothing merges until visual changes are accepted.
 
 The behavior matches the Applitools Jenkins plugin; [docs/SPEC.md](docs/SPEC.md) is the shared contract.
 
-> **Status: milestone 1.** The gated test run works. Updating the checks after someone reviews in Eyes (without re-running tests), label events, and baseline merging are still to come; see [docs/WATCHER-PROPOSAL.md](docs/WATCHER-PROPOSAL.md). Until then, re-run the job to refresh the checks.
+> **Status:** the gated test run and refreshing the checks after a review in Eyes work. Baseline merging on PR merge is still to come; see [docs/WATCHER-PROPOSAL.md](docs/WATCHER-PROPOSAL.md).
 
 ## Quick start
 
@@ -58,6 +58,47 @@ The action sets the batch, branch and key through `APPLITOOLS_*` environment var
 
 It uses the PR's **head commit**, not the merge commit `GITHUB_SHA` points to on `pull_request` events, so the checks land on the commit GitHub shows.
 
+## Updating the checks after a review in Eyes
+
+The checks show what Eyes said when the tests finished. When someone accepts or rejects changes in Eyes later, `mode: refresh` re-reads the batch and updates both checks in place. It runs no tests, so a job takes seconds. Add a second workflow:
+
+```yaml
+name: Applitools refresh
+on:
+  schedule:
+    - cron: '7-59/10 * * * 1-5'   # every 10 min on weekdays, off the top of the hour
+  workflow_dispatch:
+    inputs:
+      pr: {description: 'Pull request number (empty: every open PR)', required: false}
+  pull_request:
+    types: [labeled, unlabeled]
+
+permissions:
+  checks: write
+  pull-requests: read
+
+jobs:
+  refresh:
+    # Other labels don't need a refresh (a skipped job isn't billed).
+    if: github.event_name != 'pull_request' || github.event.label.name == 'design-review'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: applitools/visual-review-action@v0
+        with:
+          mode: refresh
+          readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}
+          pullRequest: ${{ inputs.pr }}
+          # Same design review settings as the test workflow:
+          # designers: team:Design
+```
+
+- **What it reads:** each PR's state comes from the hidden note at the end of its Visual tests check, so there's nothing to store. A PR whose tests are still running, or whose last run had no Eyes results, is skipped.
+- **What it posts:** only checks whose state or title changed. The expectations and the list of changed tests are the gated run's, not the refresh workflow's.
+- **Labels:** adding or removing the design review label refreshes that PR right away (unless the test workflow forced design review with `designReview` or `APPLITOOLS_DESIGN_REVIEW`).
+- **Right away, by hand:** Actions → Applitools refresh → Run workflow, with the PR number.
+- **Cost:** a schedule bills at least 1 minute per run in private repos, even with nothing to update: about 1,580 minutes a month for the cron above, 1,060 at every 15 minutes. Public repos are free. See [the proposal](docs/WATCHER-PROPOSAL.md#triggers-compared) for other schedules. Each pass makes 1 GitHub call to list PRs, 2 per PR to read checks, and 1 Eyes read per PR (~1.2 KB gzipped for 10 tests).
+- **Not possible with `GITHUB_TOKEN`:** a refresh button on the check (GitHub doesn't start workflows from it) and instant updates from Eyes (Eyes has no review webhook yet).
+
 ### SDK setup
 
 So that diffs don't fail the test command (errors still do), the action sets:
@@ -89,7 +130,8 @@ Teams are read from Eyes with the read key, so you manage designers in Eyes, whe
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `run` | **required** | Test command (bash) |
+| `mode` | `run` | `run` the tests, or `refresh` the checks without tests |
+| `run` | required with `mode: run` | Test command (bash) |
 | `workingDirectory` | | Where to run it |
 | `apiKey` | `$APPLITOOLS_API_KEY` | Eyes run key |
 | `readApiKey` | `$APPLITOOLS_READ_KEY`, else the run key | Eyes read key |
@@ -110,7 +152,7 @@ Teams are read from Eyes with the read key, so you manage designers in Eyes, whe
 | `designers` | anyone | Emails and/or `team:<Eyes team>` |
 | `designReviewByDefault` | `false` | Every PR needs design review |
 | `designReviewCheck` | `true` | Post the Design review check (as *skipped* when not requested) |
-| `repo`, `pullRequest`, `commit`, `branch`, `targetBranch` | from the event | Explicit PR context |
+| `repo`, `pullRequest`, `commit`, `branch`, `targetBranch` | from the event | Explicit PR context. With `mode: refresh`, `pullRequest` picks one PR; empty means every open PR |
 
 Outputs: `outcome` (`PASSED`, `CHANGES`, `FAILED`, `NO_RESULTS`), `summary`, `batchId`, `batchUrl`, `designReview` (`NOT_REQUESTED`, `WAITING`, `APPROVED`, `CHANGES_REQUESTED`).
 

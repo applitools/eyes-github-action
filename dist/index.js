@@ -38477,6 +38477,80 @@ class GitHubReporter {
         }
     }
 }
+/** Reads PRs and check runs and updates checks for a refresh. Unlike publishing, errors are thrown to the caller. */
+class GitHubRefresh {
+    octokit;
+    owner;
+    repo;
+    constructor(octokit, owner, repo) {
+        this.octokit = octokit;
+        this.owner = owner;
+        this.repo = repo;
+    }
+    async pullRequests(only) {
+        const { owner, repo } = this;
+        const toRef = (pr) => ({
+            number: pr.number,
+            headSha: pr.head.sha,
+            labels: pr.labels.flatMap(l => (l.name ? [l.name] : []))
+        });
+        if (only !== undefined) {
+            const { data } = await this.octokit.rest.pulls.get({ owner, repo, pull_number: only });
+            return data.state === 'open' ? [toRef(data)] : [];
+        }
+        const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+        return prs.map(toRef);
+    }
+    async checks(sha) {
+        const runs = [];
+        for (const name of [VISUAL_TESTS, DESIGN_REVIEW]) {
+            const { data } = await this.octokit.rest.checks.listForRef({
+                owner: this.owner,
+                repo: this.repo,
+                ref: sha,
+                check_name: name,
+                filter: 'all',
+                per_page: 100
+            });
+            runs.push(...data.check_runs);
+        }
+        return runs.map(r => ({
+            id: r.id,
+            name: r.name,
+            appId: r.app?.id,
+            status: r.status,
+            conclusion: r.conclusion,
+            title: r.output.title,
+            summary: r.output.summary
+        }));
+    }
+    async update(id, result) {
+        await this.octokit.rest.checks.update({
+            owner: this.owner,
+            repo: this.repo,
+            check_run_id: id,
+            status: 'completed',
+            conclusion: result.conclusion,
+            completed_at: new Date().toISOString(),
+            details_url: result.detailsUrl,
+            output: { title: result.title, summary: truncate(result.summary) }
+        });
+    }
+    async create(sha, result, externalId) {
+        await this.octokit.rest.checks.create({
+            owner: this.owner,
+            repo: this.repo,
+            head_sha: sha,
+            name: result.name,
+            status: 'completed',
+            conclusion: result.conclusion,
+            completed_at: new Date().toISOString(),
+            details_url: result.detailsUrl,
+            external_id: externalId,
+            output: { title: result.title, summary: truncate(result.summary) }
+        });
+    }
+}
 /** Check summaries are limited to 65535 characters. */
 function truncate(summary) {
     const max = 65_000;
@@ -38497,23 +38571,32 @@ function describeError(e) {
 
 
 function readInputs(env = process.env) {
-    const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY;
-    if (!apiKey) {
-        throw new Error('No Eyes API key. Pass `apiKey: ${{ secrets.APPLITOOLS_API_KEY }}` to the action ' +
-            '(or set APPLITOOLS_API_KEY in the step environment).');
-    }
+    const mode = oneOf('mode', ['RUN', 'REFRESH'], 'RUN');
     const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY;
+    // A refresh only reads, so the read key is enough.
+    const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : undefined);
+    if (!apiKey) {
+        throw new Error(mode === 'REFRESH'
+            ? 'No Eyes read key. Pass `readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}` to the action.'
+            : 'No Eyes API key. Pass `apiKey: ${{ secrets.APPLITOOLS_API_KEY }}` to the action ' +
+                '(or set APPLITOOLS_API_KEY in the step environment).');
+    }
     core_setSecret(apiKey);
     if (readApiKey)
         core_setSecret(readApiKey);
     const run = input('run');
-    if (!run)
+    if (mode === 'RUN' && !run)
         throw new Error('`run` is required: the command that runs your Eyes tests.');
+    const githubReporting = oneOf('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS');
+    if (mode === 'REFRESH' && githubReporting === 'STATUSES') {
+        throw new Error('`mode: refresh` needs check runs (the run state lives in them); remove `githubReporting: STATUSES`.');
+    }
     return {
+        mode,
         run,
         workingDirectory: input('workingDirectory'),
         githubToken: input('githubToken'),
-        githubReporting: oneOf('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS'),
+        githubReporting,
         config: {
             apiKey,
             readApiKey,
@@ -38582,7 +38665,127 @@ function oneOf(name, allowed, fallback) {
     return value;
 }
 
+;// CONCATENATED MODULE: ./src/refresh.ts
+/**
+ * Refresh (SPEC §8.2): re-read a finished run's batch from Eyes and update both checks in place, without running tests.
+ * Started by a schedule, by hand, or by a label change. The state comes from the Visual tests check the gated run
+ * posted (state.ts), so this needs no storage of its own.
+ */
+
+
+
+
+
+
+async function runRefresh(config, deps, only) {
+    const prs = await deps.github.pullRequests(only);
+    deps.log.info(only === undefined ? `Refreshing ${prs.length} open pull request(s)` : `Refreshing PR #${only}`);
+    const done = [];
+    for (const pr of prs) {
+        let outcome;
+        try {
+            outcome = await refreshPullRequest(config, deps, pr);
+        }
+        catch (e) {
+            outcome = { pr: pr.number, skipped: `couldn't refresh: ${refresh_message(e)}` };
+            deps.log.warning(`PR #${pr.number}: ${outcome.skipped}`);
+        }
+        done.push(outcome);
+        deps.log.info(describeRefresh(outcome));
+    }
+    return done;
+}
+async function refreshPullRequest(config, deps, pr) {
+    const found = latestRun(await deps.github.checks(pr.headSha));
+    if ('skipped' in found)
+        return { pr: pr.number, skipped: found.skipped };
+    const { visual, design, state } = found;
+    const reader = deps.eyes(config.readApiKey ?? config.apiKey);
+    let fetched;
+    try {
+        fetched = await reader.getResults(state.batchId);
+    }
+    catch (e) {
+        if (e instanceof EyesHttpError && e.unauthorized) {
+            throw new Error(`Eyes refused to share results (HTTP ${e.status}); pass a read key as readApiKey`);
+        }
+        throw e;
+    }
+    if (!fetched)
+        return { pr: pr.number, skipped: `Eyes has no results for batch ${state.batchId}` };
+    // Expectations and changed tests come from the gated run, not this workflow's inputs.
+    const results = applyExpectations({ minTests: state.expectTests, apps: state.expectApps ?? [] }, fetched);
+    const newVisual = visualTestsCompleted(results);
+    newVisual.summary += encodeState({ ...state, eyesBatchId: results.eyesBatchId ?? state.eyesBatchId });
+    const outcome = { pr: pr.number, visual: await post(deps.github, visual, newVisual) };
+    if (design || config.designReviewCheck) {
+        const inputs = {
+            // A forced review (designReview option or env in the gated run) ignores labels (SPEC §6.1).
+            option: state.designForced ?? config.designReview,
+            env: parseBool(deps.env[ENV_DESIGN_REVIEW]),
+            labelPresent: pr.labels.some(l => l.toLowerCase() === config.designReviewLabel.toLowerCase()),
+            byDefault: config.designReviewByDefault
+        };
+        let verdict;
+        try {
+            verdict = await evaluateDesign(config, inputs, results, state.changed, reader);
+        }
+        catch (e) {
+            deps.log.warning(`PR #${pr.number}: could not evaluate design review: ${refresh_message(e)}`);
+            verdict = { state: 'WAITING', title: "Design review couldn't be evaluated", detail: `${refresh_message(e)}. The next refresh tries again.` };
+        }
+        const newDesign = designReviewResult(verdict, results.url);
+        if (design) {
+            outcome.design = await post(deps.github, design, newDesign);
+        }
+        else {
+            await deps.github.create(pr.headSha, newDesign, state.batchId);
+            outcome.design = { to: newDesign.title, posted: true };
+        }
+    }
+    return outcome;
+}
+/**
+ * The newest gated run's checks. Other apps (the Jenkins plugin, say) may post checks with the same names, so ours are
+ * the ones from the app that posted the newest Visual tests check carrying gate state.
+ */
+function latestRun(checks) {
+    const newest = [...checks].sort((a, b) => b.id - a.id);
+    const withState = newest.find(c => c.name !== DESIGN_REVIEW && decodeState(c.summary));
+    if (!withState)
+        return { skipped: 'no finished gated run with Eyes results on its head commit' };
+    const ours = newest.filter(c => c.appId === withState.appId);
+    const visual = ours.find(c => c.name === withState.name);
+    if (visual.id !== withState.id) {
+        return {
+            skipped: visual.status === 'completed'
+                ? 'the latest gated run has no Eyes results to follow'
+                : 'a gated run is in progress; it posts its own results'
+        };
+    }
+    return { visual, design: ours.find(c => c.name === DESIGN_REVIEW), state: decodeState(withState.summary) };
+}
+/** Posts only on change, comparing state and title (SPEC §8.2). */
+async function post(github, current, next) {
+    const from = current.title ?? undefined;
+    if (current.status === 'completed' && current.conclusion === next.conclusion && current.title === next.title) {
+        return { from, to: next.title, posted: false };
+    }
+    await github.update(current.id, next);
+    return { from, to: next.title, posted: true };
+}
+function describeRefresh(r) {
+    if (r.skipped)
+        return `PR #${r.pr}: skipped, ${r.skipped}`;
+    const part = (name, c) => !c ? undefined : c.posted ? `${name} ${c.from ? `"${c.from}" → ` : ''}"${c.to}"` : `${name} unchanged ("${c.to}")`;
+    return `PR #${r.pr}: ${[part('Visual tests', r.visual), part('Design review', r.design)].filter(Boolean).join('; ')}`;
+}
+function refresh_message(e) {
+    return e instanceof Error ? e.message : String(e);
+}
+
 ;// CONCATENATED MODULE: ./src/main.ts
+
 
 
 
@@ -38601,6 +38804,8 @@ async function main() {
         const inputs = readInputs();
         const eventScm = scmFromEvent(github_context);
         const scm = withOverrides(eventScm, inputs.config.scm);
+        if (inputs.mode === 'REFRESH')
+            return await refresh(inputs, scm);
         const logUrl = `${github_context.serverUrl}/${github_context.repo.owner}/${github_context.repo.repo}/actions/runs/${github_context.runId}`;
         let reporter;
         const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined;
@@ -38640,6 +38845,26 @@ async function main() {
     }
     catch (e) {
         setFailed(e instanceof Error ? e.message : String(e));
+    }
+}
+/** `mode: refresh`: the event's PR (or `pullRequest`), otherwise every open PR. No tests run. */
+async function refresh(inputs, scm) {
+    if (!inputs.githubToken)
+        throw new Error('`mode: refresh` needs githubToken (the default is fine).');
+    if (!scm.owner || !scm.repo)
+        throw new Error('Repository unknown; set `repo:`.');
+    const outcomes = await runRefresh(inputs.config, {
+        github: new GitHubRefresh(getOctokit(inputs.githubToken), scm.owner, scm.repo),
+        eyes: key => new EyesClient(inputs.config.serverUrl, key),
+        log: { info: m => info(m), warning: m => warning(m) },
+        env: process.env
+    }, scm.prNumber);
+    const lines = outcomes.map(o => `- ${describeRefresh(o)}`);
+    try {
+        await summary.addRaw(`## Applitools refresh\n\n${lines.join('\n') || 'No open pull requests.'}\n`).write();
+    }
+    catch (e) {
+        core_debug(`Could not write the job summary: ${e}`);
     }
 }
 /**
