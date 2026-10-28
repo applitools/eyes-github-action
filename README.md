@@ -119,6 +119,7 @@ Outputs: `outcome` (`PASSED`, `CHANGES`, `FAILED`, `NO_RESULTS`), `summary`, `ba
 - **One gated step per batch.** Everything inside `run` shares one batch and one pair of checks. Running the action twice for the same commit reuses the commit-based batch ID.
 - **Pull requests from forks** get a read-only `GITHUB_TOKEN` and no secrets, so neither the tests nor the checks can run. That's GitHub's rule for `pull_request`; don't switch to `pull_request_target` to get around it unless you trust the code you check out.
 - **Check runs come from "GitHub Actions"**, so pick that source (or any source) when you require them.
+- **The check's "Details" link opens the workflow run**, not Eyes: GitHub replaces the details URL on checks made with `GITHUB_TOKEN`. Use **Review in Eyes** at the top of the check instead.
 - **Cost:** the wait for rendering runs on your runner and counts toward Actions minutes, up to `resultsTimeout`. Eyes calls are small: one close, a status poll every 5 s while rendering (~0.8 KB each), one results read (~1.2 KB gzipped for 10 tests). GitHub: 3 API calls per run.
 - **Merged branches:** turn on "Automatically delete head branches", or a push build of the leftover branch makes an extra batch.
 

@@ -16,7 +16,7 @@ Why check runs, not the alternatives:
 | Repo variables | `GITHUB_TOKEN` can't write them. |
 | PR comment | Visible noise; anyone can edit. |
 
-Not yet verified live: that GitHub returns `output.summary` with the HTML comment intact. Fallback if it doesn't: put the JSON in `output.text`, which is also free-form.
+Verified live (2026-10-28, sandbox PR #9): GitHub returns `output.summary` with the comment intact, and `external_id` as sent.
 
 ## Triggers compared
 
