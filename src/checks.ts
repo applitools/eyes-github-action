@@ -86,6 +86,16 @@ export function visualTestsSummary(results: BatchResults): string {
   return md
 }
 
+/** At the start of every run, until this run's results are in. */
+export function designReviewStarted(): CheckResult {
+  return {
+    name: DESIGN_REVIEW,
+    status: 'in_progress',
+    title: 'Waiting for visual tests',
+    summary: "Design review is decided once this build's visual tests have run."
+  }
+}
+
 export function designReviewResult(verdict: Verdict, batchUrl?: string): CheckResult {
   // WAITING is completed + action_required, never in_progress: GitHub won't move a completed check back to in
   // progress, and this check is often completed (skipped) first and only later requested via the PR label.

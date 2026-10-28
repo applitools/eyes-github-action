@@ -52,7 +52,7 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
       closeBatch: bool('closeBatch', true),
       waitForResults: bool('waitForResults', true),
       resultsTimeout: positiveInt('resultsTimeout') ?? 300,
-      onChanges: oneOf<ChangesPolicy>('onChanges', ['UNSTABLE', 'FAILURE', 'SUCCESS'], 'UNSTABLE'),
+      onChanges: oneOf<ChangesPolicy>('onChanges', ['SUCCESS', 'UNSTABLE', 'FAILURE'], 'SUCCESS'),
       judgeDiffs: bool('judgeDiffs', true),
       expectations: {minTests: positiveInt('expectTests'), apps: parseDesigners(input('expectApps'))},
       checks: bool('checks', true),

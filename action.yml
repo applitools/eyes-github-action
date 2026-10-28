@@ -49,9 +49,9 @@ inputs:
     required: false
     default: '300'
   onChanges:
-    description: 'What unreviewed changes do to this step: UNSTABLE (warning, step passes), FAILURE, or SUCCESS. The PR check is the gate either way.'
+    description: 'What unreviewed changes do to this step: SUCCESS (nothing), UNSTABLE (warning, step passes), or FAILURE. The PR check is the gate either way.'
     required: false
-    default: UNSTABLE
+    default: SUCCESS
   judgeDiffs:
     description: 'Tell Eyes SDKs not to fail the command on visual diffs (APPLITOOLS_EXITCODE=nodiffs, APPLITOOLS_FAIL_CYPRESS_ON_DIFF=false).'
     required: false

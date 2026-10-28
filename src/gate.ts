@@ -28,6 +28,7 @@ import {Designers, isTeam, plainDesigners, resolveDesigners} from './designers.j
 import {
   CheckResult,
   designReviewResult,
+  designReviewStarted,
   visualTestsCompleted,
   visualTestsStarted,
   visualTestsUnavailable
@@ -130,6 +131,26 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
     await reporter?.publish(result, externalId)
   }
   await publish(visualTestsStarted(batch.batchName), batch.batchId)
+  // A new check run per run, so in progress is allowed here; it clears the previous run's verdict right away.
+  const designCheck = config.designReviewCheck || config.designReview === true
+  if (designCheck) await publish(designReviewStarted(), batch.batchId)
+  const designInputs = async (): Promise<DesignInputs> => ({
+    option: config.designReview,
+    env: parseBool(deps.env[ENV_DESIGN_REVIEW]),
+    labelPresent: labelPresent({...scm, labels: (await currentLabels(deps, log)) ?? scm.labels}, config.designReviewLabel),
+    byDefault: config.designReviewByDefault
+  })
+  /**
+   * Without results, Design review can't be decided. It must still be completed: GitHub never completes a check run
+   * the API created, so one left in progress would block the PR forever.
+   */
+  const designWithoutResults = async (): Promise<void> => {
+    if (!designCheck) return
+    const verdict: Verdict = isRequired(await designInputs())
+      ? {state: 'WAITING', title: 'Waiting for visual tests', detail: "Design review is decided once this build's visual tests have results."}
+      : evaluate(false, config.designReviewLabel, emptyResults(batch.batchId), [], new Map(), plainDesigners([]))
+    await publish(designReviewResult(verdict), batch.batchId)
+  }
 
   const commandExitCode = await deps.runCommand(env)
   const base = {batchId: batch.batchId, commandExitCode, posted}
@@ -141,6 +162,7 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
     // Nothing ran, so there are no results to collect; the gate must not pass on an empty run.
     const none = applyExpectations(config.expectations, emptyResults(batch.batchId))
     await publish(visualTestsCompleted(none), batch.batchId)
+    await designWithoutResults()
     log.info(verdictLine(none))
     return {
       ...base,
@@ -151,6 +173,7 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
 
   if (!config.waitForResults) {
     await publish(visualTestsUnavailable("`waitForResults: false`, so this run didn't wait for Eyes.", false, deps.logUrl))
+    await designWithoutResults()
     return {...base, failure: commandFailure(commandExitCode)}
   }
 
@@ -158,17 +181,13 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
   const collected = await collect(reader, batch.batchId, config.resultsTimeout, log, sleep, pollMs)
   if (!collected.results) {
     await publish(visualTestsUnavailable(collected.problem, true, deps.logUrl))
+    await designWithoutResults()
     return {...base, problem: collected.problem, failure: commandFailure(commandExitCode)}
   }
 
   const results = applyExpectations(config.expectations, collected.results)
   const changed = changedTestIds(results)
-  const designInputs: DesignInputs = {
-    option: config.designReview,
-    env: parseBool(deps.env[ENV_DESIGN_REVIEW]),
-    labelPresent: labelPresent({...scm, labels: (await currentLabels(deps, log)) ?? scm.labels}, config.designReviewLabel),
-    byDefault: config.designReviewByDefault
-  }
+  const inputs = await designInputs()
   const visual = visualTestsCompleted(results)
   visual.summary += encodeState({
     v: 1,
@@ -177,19 +196,20 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
     changed,
     expectTests: config.expectations.minTests,
     expectApps: config.expectations.apps.length > 0 ? config.expectations.apps : undefined,
-    designForced: isForced(designInputs) ? isRequired(designInputs) : undefined
+    designForced: isForced(inputs) ? isRequired(inputs) : undefined
   })
   await publish(visual, batch.batchId)
 
   let design: Verdict | undefined
-  if (config.designReviewCheck || config.designReview === true) {
+  if (designCheck) {
     try {
-      design = await evaluateDesign(config, designInputs, results, changed, reader)
-      await publish(designReviewResult(design, results.url), batch.batchId)
-      log.info(`Design review: ${design.title}`)
+      design = await evaluateDesign(config, inputs, results, changed, reader)
     } catch (e) {
       log.warning(`Could not evaluate design review: ${message(e)}`)
+      design = {state: 'WAITING', title: "Design review couldn't be evaluated", detail: `${message(e)}. Re-run the job to try again.`}
     }
+    await publish(designReviewResult(design, results.url), batch.batchId)
+    log.info(`Design review: ${design.title}`)
   }
 
   // Always print the verdict first: when the test command already failed, CI often shows only the first error.

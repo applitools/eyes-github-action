@@ -37,7 +37,7 @@ function config(overrides: Partial<GateConfig> = {}): GateConfig {
     closeBatch: true,
     waitForResults: true,
     resultsTimeout: 5,
-    onChanges: 'UNSTABLE',
+    onChanges: 'SUCCESS',
     judgeDiffs: true,
     expectations: {apps: []},
     checks: true,
@@ -99,6 +99,7 @@ describe('runGate', () => {
     expect(commandEnv).toMatchObject({APPLITOOLS_BATCH_ID: 'head-sha', APPLITOOLS_BRANCH_NAME: 'acme/web/feature'})
     expect(posted.map(p => [p.result.name, p.result.status, p.result.conclusion, p.result.title])).toEqual([
       ['Applitools / Visual tests', 'in_progress', undefined, 'Running visual tests'],
+      ['Applitools / Design review', 'in_progress', undefined, 'Waiting for visual tests'],
       ['Applitools / Visual tests', 'completed', 'action_required', '1 visual change to review'],
       ['Applitools / Design review', 'completed', 'action_required', 'Waiting for design review']
     ])
@@ -116,7 +117,8 @@ describe('runGate', () => {
     expect(eyes.requests.find(r => r.method === 'DELETE')!.apiKey).toBe('RUN')
     expect(logs).toContain(`Changes to review: 1 of 2 with visual changes to review → ${eyes.url}/app/test-results/eyes-1`)
     expect(result.failure).toBeUndefined()
-    expect(result.warning).toContain('Visual changes to review')
+    expect(result.warning).toBeUndefined()
+    expect((await runGate(config({onChanges: 'UNSTABLE'}), deps())).warning).toContain('Visual changes to review')
   })
 
   it('fails the step on changes with onChanges: FAILURE, and stays quiet with SUCCESS', async () => {
@@ -157,7 +159,8 @@ describe('runGate', () => {
   it('treats a batch Eyes never saw as no results, failing unmet expectations', async () => {
     const result = await runGate(config({expectations: {minTests: 1, apps: []}}), deps())
     expect(last('Applitools / Visual tests')).toMatchObject({conclusion: 'failure', title: 'Missing results: expected at least 1 test, Eyes received 0'})
-    expect(last('Applitools / Design review')).toBeUndefined()
+    // Labelled PR: design review can't be decided without results, but must not stay in progress.
+    expect(last('Applitools / Design review')).toMatchObject({status: 'completed', conclusion: 'action_required', title: 'Waiting for visual tests'})
     expect(result.failure).toBe('Failed: expected at least 1 test, Eyes received 0')
 
     posted = []
@@ -175,10 +178,23 @@ describe('runGate', () => {
     expect(logs.some(l => l.startsWith('WARN Eyes refused to share results'))).toBe(true)
   })
 
-  it('is neutral with waitForResults: false', async () => {
+  it('is neutral with waitForResults: false, and completes a not-requested design review as skipped', async () => {
     eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: []})
-    await runGate(config({waitForResults: false}), deps())
+    await runGate(config({waitForResults: false}), deps({scm: {...scm, labels: []}}))
     expect(last('Applitools / Visual tests')).toMatchObject({conclusion: 'neutral', title: 'Results not collected'})
+    expect(last('Applitools / Design review')).toMatchObject({status: 'completed', conclusion: 'skipped', title: 'Not requested'})
+  })
+
+  it('never leaves Design review in progress when results are unreadable', async () => {
+    eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'passed'}]})
+    await runGate(config({readApiKey: undefined}), deps())
+    expect(last('Applitools / Design review')).toMatchObject({status: 'completed', conclusion: 'action_required'})
+  })
+
+  it('posts no Design review at all with designReviewCheck: false', async () => {
+    eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'passed'}]})
+    await runGate(config({designReviewCheck: false}), deps({scm: {...scm, labels: []}}))
+    expect(posted.some(p => p.result.name === 'Applitools / Design review')).toBe(false)
   })
 
   it('prints the verdict before failing on a failed test command', async () => {

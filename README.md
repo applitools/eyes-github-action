@@ -50,11 +50,11 @@ The action sets the batch, branch and key through `APPLITOOLS_*` environment var
 
 ## How a run works
 
-1. Sets `APPLITOOLS_API_KEY`, `APPLITOOLS_SERVER_URL`, `APPLITOOLS_BATCH_ID` (the PR head SHA), `APPLITOOLS_BATCH_NAME` (`owner/repo PR #7: title`), `APPLITOOLS_BATCH_SEQUENCE`, `APPLITOOLS_BRANCH_NAME` (`owner/repo/feature`), `APPLITOOLS_PARENT_BRANCH_NAME` (`owner/repo/main`), `APPLITOOLS_DONT_CLOSE_BATCHES=true`, `APPLITOOLS_GATE_MANAGED=true` (and `APPLITOOLS_JENKINS_MANAGED=true`, so Jenkins-ready configs work unchanged). Posts Visual tests as *in progress*.
+1. Sets `APPLITOOLS_API_KEY`, `APPLITOOLS_SERVER_URL`, `APPLITOOLS_BATCH_ID` (the PR head SHA), `APPLITOOLS_BATCH_NAME` (`owner/repo PR #7: title`), `APPLITOOLS_BATCH_SEQUENCE`, `APPLITOOLS_BRANCH_NAME` (`owner/repo/feature`), `APPLITOOLS_PARENT_BRANCH_NAME` (`owner/repo/main`), `APPLITOOLS_DONT_CLOSE_BATCHES=true`, `APPLITOOLS_GATE_MANAGED=true` (and `APPLITOOLS_JENKINS_MANAGED=true`, so Jenkins-ready configs work unchanged). Posts Visual tests as *in progress*, and Design review as *in progress* ("Waiting for visual tests"), so a re-run never shows the previous run's verdict.
 2. Runs `run` with bash (`-eo pipefail`, like a `run:` step). Action inputs, including the GitHub token, are kept out of its environment.
 3. Closes the batch, waits for Eyes to finish rendering (up to `resultsTimeout`), and reads the results with the read key.
 4. Posts both checks and the job summary, and prints the verdict, e.g. `Changes to review: 2 of 10 with visual changes to review → https://eyes…`.
-5. The step fails if the test command failed or Eyes tests failed. Unreviewed changes only add a warning by default (`onChanges: UNSTABLE`), because the check is the gate. Problems talking to Eyes or GitHub never fail the step; the checks show them.
+5. The step fails if the test command failed or Eyes tests failed. Unreviewed changes don't fail it by default (`onChanges: SUCCESS`): the check is the gate, and waiting on reviewers isn't a failure. Problems talking to Eyes or GitHub never fail the step; the checks show them.
 
 It uses the PR's **head commit**, not the merge commit `GITHUB_SHA` points to on `pull_request` events, so the checks land on the commit GitHub shows.
 
@@ -98,7 +98,7 @@ Teams are read from Eyes with the read key, so you manage designers in Eyes, whe
 | `closeBatch` | `true` | Close the batch after the command |
 | `waitForResults` | `true` | Wait for rendering and read results (`false` posts a neutral check) |
 | `resultsTimeout` | `300` | Seconds to wait for rendering |
-| `onChanges` | `UNSTABLE` | Unreviewed changes: `UNSTABLE` (warning), `FAILURE` (fail the step), `SUCCESS` |
+| `onChanges` | `SUCCESS` | Unreviewed changes: `SUCCESS` (step passes), `UNSTABLE` (warning), `FAILURE` (fail the step) |
 | `judgeDiffs` | `true` | Set the SDK variables above |
 | `expectTests` | | Minimum number of Eyes tests; fewer fails the check |
 | `expectApps` | | Eyes app names that must each report a test (comma/newline separated) |
