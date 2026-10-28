@@ -32,7 +32,7 @@ export class FakeEyes {
   readonly batches = new Map<string, FakeBatch>()
   readonly requests: Request[] = []
   /** Keys and what they may do. */
-  readonly keys = new Map<string, {read: boolean; orgId?: string}>()
+  readonly keys = new Map<string, {read: boolean; orgId?: string; permissions?: string[]}>()
   teams: {id: string; name: string; members: Record<string, object>}[] = []
   /** Only accept the key as a query parameter on close (older servers). */
   closeNeedsQueryKey = false
@@ -102,7 +102,7 @@ export class FakeEyes {
     }
     // GET /api/v1/auth/api-key-validation
     if (url.pathname === '/api/v1/auth/api-key-validation') {
-      return send(200, {teamId: 't1', orgId: key.orgId, user: 'ci@example.com', permissions: ['read']})
+      return send(200, {teamId: 't1', orgId: key.orgId, user: 'ci@example.com', permissions: key.permissions ?? (key.read ? ['read'] : ['execute'])})
     }
     // GET /api/admin/orgs/{orgId}/accounts/
     if (parts[1] === 'admin' && parts[4] === 'accounts') {

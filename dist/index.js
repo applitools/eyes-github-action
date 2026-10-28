@@ -38219,16 +38219,20 @@ async function runGate(config, deps) {
             : evaluate(false, config.designReviewLabel, emptyResults(batch.batchId), [], new Map(), plainDesigners([]));
         await publish(designReviewResult(verdict), batch.batchId);
     };
+    const eyes = deps.eyes(config.apiKey);
+    const keyProblem = await checkRunKey(eyes, log);
     const commandExitCode = await deps.runCommand(env);
     const base = { batchId: batch.batchId, commandExitCode, posted };
-    const eyes = deps.eyes(config.apiKey);
     if (!config.closeBatch) {
         log.info(`closeBatch: false, leaving batch ${batch.batchId} open`);
     }
     else if (!(await gate_close(eyes, batch.batchId, log))) {
         // Nothing ran, so there are no results to collect; the gate must not pass on an empty run.
         const none = applyExpectations(config.expectations, emptyResults(batch.batchId));
-        await publish(visualTestsCompleted(none), batch.batchId);
+        const check = visualTestsCompleted(none);
+        if (keyProblem)
+            check.summary += `\n**${keyProblem}**\n`;
+        await publish(check, batch.batchId);
         await designWithoutResults();
         log.info(verdictLine(none));
         return {
@@ -38311,6 +38315,24 @@ async function evaluateDesign(config, inputs, results, changed, reader) {
             approvers.set(id, await reader.sessionApprovers(results.eyesBatchId, id));
     }
     return evaluate(required, config.designReviewLabel, results, changed, approvers, designers);
+}
+/**
+ * A key without `execute` can't upload tests (Eyes answers 403 to the SDK), which otherwise only shows up as "no
+ * results". Best effort: an unreachable server or an old one without this endpoint says nothing.
+ */
+async function checkRunKey(eyes, log) {
+    try {
+        const { permissions } = await eyes.keyInfo();
+        if (permissions.length === 0 || permissions.includes('execute'))
+            return undefined;
+        const problem = `The Eyes API key (apiKey) has ${permissions.join(', ')} permission, so Eyes refuses its test uploads. ` +
+            'Use a run key with execute permission.';
+        log.warning(problem);
+        return problem;
+    }
+    catch {
+        return undefined;
+    }
 }
 /** @returns false if Eyes has never heard of the batch (no tests reported to it) */
 async function gate_close(eyes, batchId, log) {

@@ -169,6 +169,20 @@ describe('runGate', () => {
     expect(plain.failure).toBeUndefined()
   })
 
+  it('explains a run key without execute permission (it can only show up as no results otherwise)', async () => {
+    eyes.keys.set('WRITE', {read: false, permissions: ['write']})
+    await runGate(config({apiKey: 'WRITE'}), deps())
+    const check = last('Applitools / Visual tests')!
+    expect(check.title).toBe('No Eyes results')
+    expect(check.summary).toContain('has write permission, so Eyes refuses its test uploads')
+    expect(logs.some(l => l.startsWith('WARN The Eyes API key (apiKey) has write permission'))).toBe(true)
+  })
+
+  it('stays quiet about a proper run key', async () => {
+    await runGate(config(), deps())
+    expect(logs.some(l => l.includes('permission'))).toBe(false)
+  })
+
   it('posts "Couldn\'t read Eyes results" when only a run key is available, without failing the step', async () => {
     eyes.batches.set('head-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'passed'}]})
     const result = await runGate(config({readApiKey: undefined}), deps())
