@@ -67,11 +67,11 @@ The gate needs: `owner/repo`, the commit under test, the branch, and for PRs the
 | --- | --- | --- | --- |
 | Batch ID | head commit SHA | commit SHA | random UUID per block |
 | Batch name | `owner/repo PR #N: title` | `owner/repo branch` | `job #build` |
-| Branch name | `owner/repo/source-branch` | `owner/repo/branch` | unset |
+| Branch name | `owner/repo/source-branch`; **fork PRs:** `owner/repo/pr-N` | `owner/repo/branch` | unset |
 | Parent branch | `owner/repo/target-branch` | unset | unset |
 | Batch sequence | `owner/repo` (or job name) | same | job name |
 
-Branch names MUST be `owner/repo/branch`: that's the format Eyes' SCM integrations and the merge API use. Without the repo prefix, only the bare branch name is used.
+Branch names MUST be `owner/repo/branch`: that's the format Eyes' SCM integrations and the merge API use. Without the repo prefix, only the bare branch name is used. A fork's branch name can equal one of the repository's own (a fork's `main`), so fork PRs MUST use `owner/repo/pr-N` instead. Record the branch name used, for the baseline merge (§11).
 
 ### 3.3 Environment variables set inside the gated block
 
@@ -212,7 +212,7 @@ The point of the gate is that results update when reviewers act in Eyes, with no
 - **Branch builds are not followed** by default (opt-in `followBranchBuilds`): nobody reviews them, so they'd never settle. When followed, they stop once **settled**.
 - **Open PRs** stay followed when settled, because a label change or the merge can still affect them, and a reviewer can change their mind in Eyes (re-read every 30 min).
 - **Reconciliation on every pass** (no network in the common case): drop when the build is deleted, the job is gone or disabled (closed PR / deleted branch), or the job has a newer finished build. Before dropping a closed PR, **ask GitHub whether it merged**, and if so run the baseline merge (covers missed webhooks). If GitHub can't be reached, retry next pass instead of dropping.
-- Dropped when: the PR closes (or merges and its baseline merge succeeds), the build is deleted, after **14 days**, or past a **cap of 500** (oldest first).
+- Dropped when: the PR closes (or merges and its baseline merge succeeds), the build is deleted, after **14 days** (Jenkins: configurable), or past a **cap of 500** (oldest first).
 
 ### 8.2 Refresh
 
@@ -226,15 +226,16 @@ Re-read results (read key) → re-apply expectations → if the Visual tests sta
 | PR `closed`, `merged: true` | Baseline merge (§11); keep the review (settled) until the merge succeeds, so a retry can find it |
 | PR `closed`, not merged | Stop following |
 
-Sources: webhooks when available; otherwise **poll the PR** (§10.8). Both MUST run the same handlers.
+Sources: webhooks when available; otherwise **poll the PR** (§10.8). Both MUST run the same handlers. **A webhook is only a prompt:** before merging baselines or changing label state, read the PR from GitHub with the job's own credentials and use that response's `merged`, `head.ref`, `base.ref` and labels. Never act on a payload's values; a forged or replayed webhook (e.g. without a webhook secret) must not be able to merge baselines or switch design review off. Run at most one merge per build at a time.
 
 ### 8.4 Polling limits (Jenkins values; an Action will have its own constraints)
 
 | Limit | Value |
 | --- | --- |
-| Interval by review age | 1 min (first hour) → 5 min (first day) → 30 min |
-| Error backoff | Interval doubled per consecutive error, at most 1 hour; reset on success |
-| Per-pass time budget | 50 s; least recently polled first |
+| Interval by review age | 1 min (first hour) → 5 min (first day) → 30 min by default. Jenkins lets admins set each interval and step (fastest 15 s); a later interval is never shorter than an earlier one |
+| Settled open PRs | Re-read every 30 min by default (Jenkins: configurable) |
+| Error backoff | Interval doubled per consecutive error, at most 1 hour (or the slowest interval, if longer); reset on success |
+| Per-pass time budget | 50 s (Jenkins: ⅚ of the pass interval when under a minute, at least 10 s); least recently polled first |
 | Overlap | Never two passes at once |
 | Saves | Only when something changed |
 | HTTP | One shared client; gzip for Eyes; ETag for GitHub PRs |
@@ -317,7 +318,7 @@ Results: merged → "Baselines merged into base"; nothing to merge → success; 
 
 ## 11. Baseline merge on PR merge
 
-- Trigger: PR closed with `merged: true`; source `owner/repo/<head.ref>`, target `owner/repo/<base.ref>`.
+- Trigger: PR closed with `merged: true`, **as read from GitHub** (§8.3); source: the Eyes branch recorded at build time (falling back to `owner/repo/<head.ref>`), target `owner/repo/<base.ref>`.
 - Use the merge key (configured → `applitools-merge-api-key` → run key); poll the task every 5 s, for at most 10 min.
 - Post **Applitools / Baseline merge** on the PR's last tested commit.
 - Keep the review until success, so a redelivered `closed` event (or the next poll) retries after the key or conflicts are fixed.
@@ -337,7 +338,24 @@ Results: merged → "Baselines merged into base"; nothing to merge → success; 
 
 ## 13. Setup checks (the "doctor")
 
-The Jenkins setup page checks, live, and every implementation SHOULD offer the equivalent: the Eyes server is reachable; run/read/merge keys are present and valid, with their permissions (§10.8 / §10.6); designers resolve (show team members); GitHub reporting works (last call OK); webhooks or polling are active; which builds are followed and which are waiting. Each problem comes with the exact fix.
+The Jenkins setup page checks, live, when an admin clicks **Run checks** (a POST, so following a link can't trigger the requests), and every implementation SHOULD offer the equivalent: the Eyes server is reachable; run/read/merge keys are present and valid, with their permissions (§10.8 / §10.6); designers resolve (show team members); GitHub reporting works (last call OK); webhooks or polling are active; which builds are followed and which are waiting. Each problem comes with the exact fix.
+
+---
+
+## 13a. Security rules
+
+Implementations MUST:
+
+- **Not give fork PRs the key** by default: their test code is untrusted. Refuse with a clear message; allow only by an admin opt-in (then use the fork branch name, §3.2).
+- **Confirm webhooks with GitHub** before merging baselines or changing label state (§8.3).
+- **Check server URLs** before sending a key: `https` (plain `http` only to the local machine, or by admin opt-in), no user info in the URL, never link-local, unspecified, multicast or cloud metadata addresses (`169.254.169.254`, `fd00:ec2::254`, `metadata.google.internal`).
+- **Send keys in headers only.** A query-string fallback for old on-premises servers is admin opt-in.
+- **Never echo response content** in errors, logs or PR results: status code and content type only.
+- **Cap responses** (Jenkins: 16 MB, before and after decompression).
+- **Keep only http(s) links** from Eyes results; show test, batch and environment names as plain text (escape Markdown).
+- **Keep the key encrypted** wherever the platform persists state, and mark it secret/sensitive.
+
+Implementations SHOULD offer: an admin lock so the pipeline file can't loosen design review (turn it off, choose designers, change the label, skip results), and an option to leave reviewer emails out of PR results.
 
 ---
 
