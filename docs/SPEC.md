@@ -309,7 +309,7 @@ Auth: header `X-Eyes-Api-Key: <key>` works everywhere we tried (preferred; keeps
 2. `GET /api/tasks/{id}/status` → 200 running, **201** done.
 3. `GET /api/tasks/{id}/result` → `{merged, conflicts, changes: [...]}`; 404 = a branch doesn't exist.
 
-Results: merged → "Baselines merged into base"; nothing to merge → success; conflicts → failure "N baseline conflicts" (resolve in Eyes: Compare & merge branches); 403 → "Eyes refused the baseline merge" (needs a merge key).
+Results: merged with changes → "Baselines merged into base"; not merged, or **merged with 0 changes** → success "Nothing to merge" (Eyes reports `merged: true, changes: []` once the conflicts were resolved and merged by hand in Eyes); conflicts → failure "N baseline conflicts" (resolve in Eyes: Compare & merge branches); 403 → "Eyes refused the baseline merge" (needs a merge key).
 
 ### 10.8 Side-effect-free key probes (for a setup/doctor check)
 - Validity / read: `GET /api/sessions/batches/<nonexistent>/bypointerid` → 401 invalid, 403 valid-but-can't-read, **404 can read**.
@@ -323,8 +323,39 @@ Results: merged → "Baselines merged into base"; nothing to merge → success; 
 - Trigger: PR closed with `merged: true`, **as read from GitHub** (§8.3); source: the Eyes branch recorded at build time (falling back to `owner/repo/<head.ref>`), target `owner/repo/<base.ref>`.
 - Use the merge key (configured → `applitools-merge-api-key` → run key); poll the task every 5 s, for at most 10 min.
 - Post **Applitools / Baseline merge** on the PR's last tested commit.
-- Keep the review until success, so a redelivered `closed` event (or the next poll) retries after the key or conflicts are fixed.
+- Jenkins: keep the review until success, so a redelivered `closed` event (or the next poll) also retries.
 - Verified live: after merging, the next `main` build passed the accepted Storybook changes instead of flagging them again.
+
+### 11.1 Unmerged baselines: make them impossible to miss
+
+A merge that fails (conflicts, refused or missing key, timeout, failure, or skipped with known branches) MUST stay visible until the baselines are merged. User-facing explanation: the plugin's `docs/BASELINE-MERGES.md`; the Action's README, "When a merge fails".
+
+**On the merged PR:**
+- **One comment**, found again by the hidden marker `<!-- applitools-baseline-merge -->` and edited in place, never duplicated. Re-posted only when the reason changes, so retries don't spam the PR.
+  - Failing: `### ⚠️ Eyes baselines from this PR weren't merged into \`<target>\``, then **<reason>.** <what to do>, then: until they're merged, builds of `<target>` fail the **Applitools / Baseline merge** check (and are marked unstable, where that applies) and may flag the changes this PR accepted; each one retries first, and this comment is updated when one succeeds.
+  - Resolved: `### ✅ Eyes baselines from this PR are merged into \`<target>\``, then the merge's summary ("N baseline changes from `src` now apply to `tgt`." or "Nothing was left to merge from `src` into `tgt`.") and "Confirmed by <link to the build or run>".
+- **The label** `eyes-baselines-not-merged` while unmerged; removed once merged.
+- Needs **Pull requests: write**. Without it, warn (log, setup page or job summary) and keep everything else.
+
+**Conflict wording** (shared): "The same checkpoints changed on `<target>` too. In Eyes, open **Compare & merge branches**, compare `src` → `tgt`, resolve the conflicts, then merge."
+
+**On every build of the target branch,** before its tests: retry each unmerged PR's merge into that branch (OnlyCheck=false).
+- Still failing: a failing **Applitools / Baseline merge** check on the build's commit, listing the PRs and reasons.
+- Succeeds (merged, or nothing to merge): a passing check, the comment turned ✅, the label removed.
+- A retry that only fails for lack of a usable merge key (refused or no key) MUST NOT replace a different recorded reason (e.g. conflicts): the check says the merge wasn't retried and why, and the comment keeps the real reason.
+- No unmerged PRs into the branch: post no check.
+
+| | Jenkins plugin | GitHub Action |
+| --- | --- | --- |
+| Where the unmerged list lives | `UnmergedBaselines.xml` in `$JENKINS_HOME`; an entry leaves only when merged | The label: the 300 most recently updated closed PRs into the branch are listed and filtered by it (needs only `pull-requests: read`, no search-index delay) |
+| Retry's merge key | The branch build's: configured merge key → `applitools-merge-api-key` → its run key | Only an explicitly given `mergeApiKey`; without one the check fails with "not retried, pass mergeApiKey" |
+| Retry wait | At most 2 min per PR (`BaselineMergeAlerts.retryTimeoutSeconds`) | The action's merge timeout |
+| Comment and label on/off | `commentOnUnmergedBaselines` (default on) | `baselineMergeAlerts` (default on) |
+| Failing branch | `unstableWhileUnmerged` (default on): the build is UNSTABLE; the check fails either way | `failBranchOnUnmergedBaselines` (default on); off = neutral check |
+| Notified when the merge first fails | The PR comment (GitHub notification) | The PR comment, plus the failed merge run's email to whoever triggered it |
+| Admin view | Manage Jenkins → Applitools setup → Unmerged baselines | `is:pr label:eyes-baselines-not-merged` |
+
+Verified live with the Action (sandbox PR #16): a conflict produced the ⚠️ comment and the label, and the branch build a red check. After the conflicts were resolved in Eyes, the next branch build removed the label, turned the comment ✅ and posted a green check.
 
 ---
 
@@ -367,9 +398,9 @@ Implementations SHOULD offer: an admin lock so the pipeline file can't loosen de
 | --- | --- |
 | Gated block | A JS action wrapping the test step (or `pre`/`post`): sets env, then closes, waits, reads, posts |
 | PR context | `github.event.pull_request.{number, head.sha, head.ref, base.ref, title}`, `github.repository` |
-| GitHub App / token | `GITHUB_TOKEN` with `checks: write`, `statuses: write`, `pull-requests: read` |
+| GitHub App / token | `GITHUB_TOKEN` with `checks: write`, `statuses: write`, `pull-requests: write` (`read` without the unmerged-baselines comment and label, §11.1) |
 | Label events | Workflow on `pull_request: [labeled, unlabeled]`: re-evaluate Design review only, no tests |
-| Baseline merge | Workflow on `pull_request: [closed]` when `merged == true` |
+| Baseline merge | Workflow on `pull_request: [closed]` when `merged == true`; unmerged baselines retried by runs on `push` to the target branch (§11.1) |
 | Watcher | **No long-running process.** Options: a `schedule` workflow re-checking open PRs (5-minute minimum interval), an Eyes notification → `repository_dispatch`, or `workflow_dispatch` from Eyes. Store per-PR state in the check runs themselves (e.g. an `external_id` or summary metadata) or in an artifact, since there's no registry on disk. |
 | Setup page | A `doctor` mode writing §13 to the job summary |
 | Secrets | `APPLITOOLS_API_KEY`, `APPLITOOLS_READ_KEY`, `APPLITOOLS_MERGE_KEY` as repo/org secrets |
