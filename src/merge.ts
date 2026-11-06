@@ -94,7 +94,7 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
   })
   const report = async (outcome: MergeOutcome, title: string, summary: string): Promise<MergeReport> => {
     const ok = OK.includes(outcome)
-    const full = ok ? summary : summary + fixThenRetry
+    const full = ok ? summary : summary + (outcome === 'CONFLICTS' ? "\n\nOnce they're resolved, re-run this job to confirm." : fixThenRetry)
     await reporter?.publish(mergeCheck(ok, title, full))
     if (ok) log.info(`Baseline merge from PR #${pr.number}: ${title}. ${plain(summary)}`)
     else log.warning(`Baseline merge from PR #${pr.number}: ${title}. ${plain(full)}`)

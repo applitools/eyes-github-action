@@ -37511,8 +37511,7 @@ function computeBatch(scm, fallbackLabel, overrides = {}) {
         defaultName = fallbackLabel;
     }
     return {
-        // No commit to key on: unique per run.
-        batchId: overrides.batchId || scm.commitSha || (0,external_node_crypto_.randomUUID)(),
+        batchId: overrides.batchId || defaultBatchId(scm),
         batchName: overrides.batchName || defaultName,
         // A fork's branch can share a name with the repository's own (its main), so forks get one per PR (SPEC §3.2).
         branchName: overrides.branchName ||
@@ -37520,6 +37519,17 @@ function computeBatch(scm, fallbackLabel, overrides = {}) {
         parentBranchName: overrides.parentBranchName || (scm.targetBranch ? prefix + scm.targetBranch : undefined),
         sequenceName: label
     };
+}
+/**
+ * SPEC §3.2. A PR build is keyed on its head commit. A branch build adds the branch: the same commit is often built as a
+ * PR and as a branch at once (a push to a PR's branch), or on two branches, and builds sharing a batch close and read
+ * each other's results.
+ */
+function defaultBatchId(scm) {
+    // No commit to key on: unique per run.
+    if (!scm.commitSha)
+        return (0,external_node_crypto_.randomUUID)();
+    return isPullRequest(scm) || !scm.branch ? scm.commitSha : `${scm.commitSha}-${scm.branch}`;
 }
 const ENV_MANAGED = 'APPLITOOLS_GATE_MANAGED';
 /** The Jenkins plugin's marker; set too so test configs written for Jenkins work unchanged (SPEC §3.3). */
@@ -38379,7 +38389,7 @@ async function runMerge(config, deps, prNumber) {
     });
     const report = async (outcome, title, summary) => {
         const ok = OK.includes(outcome);
-        const full = ok ? summary : summary + fixThenRetry;
+        const full = ok ? summary : summary + (outcome === 'CONFLICTS' ? "\n\nOnce they're resolved, re-run this job to confirm." : fixThenRetry);
         await reporter?.publish(mergeCheck(ok, title, full));
         if (ok)
             log.info(`Baseline merge from PR #${pr.number}: ${title}. ${plain(summary)}`);

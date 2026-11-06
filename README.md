@@ -254,7 +254,7 @@ The action follows the plugin's security rules ([SPEC §13a](docs/SPEC.md#13a-se
 
 ## Good to know
 
-- **One gated step per batch.** Everything inside `run` shares one batch and one pair of checks. Running the action twice for the same commit reuses the commit-based batch ID.
+- **One gated step per batch.** Everything inside `run` shares one batch and one pair of checks. Running the action twice in one build of a commit reuses its batch ID. PR and branch builds of the same commit get separate batches (`<sha>` and `<sha>-<branch>`), so they can run at the same time.
 - **Pull requests from forks** get a read-only `GITHUB_TOKEN` and no secrets on `pull_request`, so their tests and checks can't run. Don't run the *test* workflow on `pull_request_target` to get around it: that would run the fork's code with your secrets.
 - **Check runs come from "GitHub Actions"**, so pick that source (or any source) when you require them.
 - **The check's "Details" link opens the workflow run**, not Eyes: GitHub replaces the details URL on checks made with `GITHUB_TOKEN`. Use **Review in Eyes** at the top of the check instead.

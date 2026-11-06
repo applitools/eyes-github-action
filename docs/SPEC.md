@@ -65,11 +65,13 @@ The gate needs: `owner/repo`, the commit under test, the branch, and for PRs the
 
 | Value | PR | Branch build | No SCM info |
 | --- | --- | --- | --- |
-| Batch ID | head commit SHA | commit SHA | random UUID per block |
+| Batch ID | head commit SHA | `<commit SHA>-<branch>` | random UUID per block |
 | Batch name | `owner/repo PR #N: title` | `owner/repo branch` | `job #build` |
 | Branch name | `owner/repo/source-branch`; **fork PRs:** `owner/repo/pr-N` | `owner/repo/branch` | unset |
 | Parent branch | `owner/repo/target-branch` | unset | unset |
 | Batch sequence | `owner/repo` (or job name) | same | job name |
+
+A branch build's batch ID MUST differ from a PR build's: one commit is often built both ways at once (a push to a PR's branch), or on two branches, and builds sharing a batch close and read each other's results.
 
 Branch names MUST be `owner/repo/branch`: that's the format Eyes' SCM integrations and the merge API use. Without the repo prefix, only the bare branch name is used. A fork's branch name can equal one of the repository's own (a fork's `main`), so fork PRs MUST use `owner/repo/pr-N` instead. Record the branch name used, for the baseline merge (§11).
 

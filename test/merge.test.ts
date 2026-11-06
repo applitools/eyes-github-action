@@ -99,7 +99,8 @@ describe('runMerge', () => {
     expect(await runMerge(config(), deps(), 7)).toMatchObject({outcome: 'CONFLICTS', ok: false})
     expect(last()).toMatchObject({conclusion: 'failure', title: '3 baseline conflicts'})
     expect(last().summary).toContain('Resolve them in Eyes under **Compare & merge branches**')
-    expect(last().summary).toContain('re-run this job to retry')
+    expect(last().summary).toContain("Once they're resolved, re-run this job to confirm.")
+    expect(last().summary.match(/Compare & merge branches/g)).toHaveLength(1)
     expect(logs.some(l => l.startsWith('WARN Baseline merge from PR #7: 3 baseline conflicts.'))).toBe(true)
   })
 

@@ -69,14 +69,21 @@ describe('computeBatch (SPEC §3.2)', () => {
     })
   })
 
-  it('branch build: no parent branch', () => {
+  it('branch build: its own batch ID, no parent branch', () => {
     expect(computeBatch({owner: 'a', repo: 'b', commitSha: 's', branch: 'main'}, 'wf #1')).toEqual({
-      batchId: 's',
+      batchId: 's-main',
       batchName: 'a/b main',
       branchName: 'a/b/main',
       parentBranchName: undefined,
       sequenceName: 'a/b'
     })
+  })
+
+  it('a PR build and a branch build of one commit get different batches', () => {
+    const pr = computeBatch({owner: 'a', repo: 'b', commitSha: 's', branch: 'feature', prNumber: 3, targetBranch: 'main'}, 'x')
+    const branch = computeBatch({owner: 'a', repo: 'b', commitSha: 's', branch: 'feature'}, 'x')
+    expect([pr.batchId, branch.batchId]).toEqual(['s', 's-feature'])
+    expect(pr.branchName).toBe(branch.branchName)
   })
 
   it('no SCM info: random ID per run, label name, no branches', () => {
