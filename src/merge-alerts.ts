@@ -50,10 +50,11 @@ export function failureComment(pr: MergedPullRequest, attempt: MergeAttempt, opt
 }
 
 export function mergedComment(pr: MergedPullRequest, attempt: MergeAttempt, runUrl: string): string {
-  const how =
+  const summary =
     attempt.outcome === 'NOTHING_TO_MERGE'
-      ? `Nothing was left to merge from \`${attempt.source}\` into \`${attempt.target}\`. Confirmed by [this run](${runUrl}).`
-      : `${attempt.detail} Merged by [this run](${runUrl}).`
+      ? `Nothing was left to merge from \`${attempt.source}\` into \`${attempt.target}\`.`
+      : attempt.detail
+  const how = `${summary} Confirmed by [this run](${runUrl}).`
   return `${ALERT_MARKER}\n### ✅ Eyes baselines from this PR are merged into \`${pr.baseRef}\`\n\n${how}\n`
 }
 
@@ -145,6 +146,12 @@ export async function retryUnmergedBaselines(
       report.problems.push(...(await clearAlert(deps.alerts, pr, attempt, urls.run)))
       sections.push(`✅ ${link}: ${attempt.title}. ${attempt.detail}`)
       report.notes.push({pr: pr.number, ok: true, line: `Eyes baselines from PR #${pr.number} are now merged into ${branch}: ${attempt.title}.`})
+    } else if (attempt.outcome === 'REFUSED' || attempt.outcome === 'NO_KEY') {
+      // Only this run's key failed, not the merge: keep the PR's recorded reason (SPEC §11.1).
+      failing.push(pr)
+      const why = `Eyes refused this workflow's \`mergeApiKey\`. ${attempt.detail} The PR's comment says why the merge failed.`
+      sections.push(`❌ ${link}: not retried. ${why}`)
+      report.notes.push({pr: pr.number, ok: false, line: `Eyes baselines from PR #${pr.number} still aren't merged into ${branch}. ${plain(why)}`})
     } else {
       failing.push(pr)
       if (options.comment) report.problems.push(...(await raiseAlert(deps.alerts, pr, attempt, options)))

@@ -121,7 +121,7 @@ describe('a failed merge comments on and labels the PR', () => {
     expect(pr.labels).toEqual([])
     expect(comments[0].body).toBe(
       `${ALERT_MARKER}\n### ✅ Eyes baselines from this PR are merged into \`main\`\n\n` +
-        `3 baseline changes from \`acme/web/feature\` now apply to \`acme/web/main\`. Merged by [this run](${RUN}).\n`
+        `3 baseline changes from \`acme/web/feature\` now apply to \`acme/web/main\`. Confirmed by [this run](${RUN}).\n`
     )
   })
 
@@ -196,6 +196,14 @@ describe('builds of the target branch retry until the merge works', () => {
       'Nothing was left to merge from `acme/web/feature` into `acme/web/main`. Confirmed by [this run](https://github.com/acme/web/actions/runs/43).'
     )
     expect(report.notes[0]).toMatchObject({ok: true})
+  })
+
+  it('keeps the real reason when Eyes refuses the retry\'s key', async () => {
+    const report = await retry(on, 'RUN')
+    expect(report.check).toMatchObject({conclusion: 'failure'})
+    expect(report.check!.summary).toContain("not retried. Eyes refused this workflow's `mergeApiKey`.")
+    expect(writes).toEqual([])
+    expect(comments[0].body).toContain('**2 baseline conflicts**')
   })
 
   it("doesn't retry without a merge key, so the comment keeps the real reason", async () => {

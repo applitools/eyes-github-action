@@ -186,7 +186,7 @@ To retry without waiting for the next push, re-run the failed merge job, or the 
 
 Notes:
 - **The label is the to-do list.** The action has nowhere else to keep state. Removing it by hand stops the retries; adding it makes the next `main` build retry that PR.
-- **Retries need `mergeApiKey`** in the test workflow. Without it, `main` builds still fail the check and say why, but don't retry (a run key would only replace the real reason with "Eyes refused").
+- **Retries need `mergeApiKey`** in the test workflow. Without it, or if Eyes refuses it, `main` builds still fail the check and say why, and the PR's comment keeps the real reason (say, the conflicts) instead of switching to "Eyes refused".
 - **Permissions:** commenting and labeling need `pull-requests: write` in the merge workflow, and removing the label needs it in the test workflow. Without it, the run warns in its log and job summary, and the checks still fail. Without the label, though, `main` builds can't know to retry.
 - **Report only:** `baselineMergeAlerts: false` skips the comment and label; `failBranchOnUnmergedBaselines: false` posts `main`'s Baseline merge check as neutral instead of failing it.
 - `main` builds look through the 300 most recently updated closed PRs into the branch. Adding the label updates a PR, so that's plenty unless hundreds of PRs merge while one waits.
