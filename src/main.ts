@@ -7,7 +7,8 @@ import path from 'node:path'
 import {ScmInfo, scmFromEvent, withOverrides} from './context.js'
 import {EyesClient} from './eyes.js'
 import {GateResult, runGate} from './gate.js'
-import {GitHubRefresh, GitHubReporter, Reporter} from './github.js'
+import {GitHubApi, GitHubReporter, Reporter} from './github.js'
+import {mergeNotesBeforeTests, runMerge} from './merge.js'
 import {ActionInputs, readInputs} from './inputs.js'
 import {describeRefresh, runRefresh} from './refresh.js'
 import {OUTCOME_LABELS, outcome, summary} from './results.js'
@@ -19,6 +20,7 @@ export async function main(): Promise<void> {
     const eventScm = scmFromEvent(context)
     const scm = withOverrides(eventScm, inputs.config.scm)
     if (inputs.mode === 'REFRESH') return await refresh(inputs, scm)
+    if (inputs.mode === 'MERGE') return await merge(inputs, scm)
     const logUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
 
     let reporter: Reporter | undefined
@@ -47,6 +49,17 @@ export async function main(): Promise<void> {
       env: process.env,
       scm: eventScm,
       fallbackLabel: `${context.workflow} #${context.runNumber}`,
+      mergeNotes:
+        octokit && scm.owner && scm.repo && scm.commitSha && scm.branch
+          ? () =>
+              mergeNotesBeforeTests(
+                new GitHubApi(octokit, scm.owner!, scm.repo!),
+                scm.commitSha!,
+                scm.branch!,
+                {info: m => core.info(m), warning: m => core.warning(m)},
+                ms => new Promise(r => setTimeout(r, ms))
+              )
+          : undefined,
       currentLabels: async () => {
         if (!octokit || !scm.owner || !scm.repo || scm.prNumber === undefined) return undefined
         const pr = await octokit.rest.pulls.get({owner: scm.owner, repo: scm.repo, pull_number: scm.prNumber})
@@ -71,7 +84,7 @@ async function refresh(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
   const outcomes = await runRefresh(
     inputs.config,
     {
-      github: new GitHubRefresh(getOctokit(inputs.githubToken), scm.owner, scm.repo),
+      github: new GitHubApi(getOctokit(inputs.githubToken), scm.owner, scm.repo),
       eyes: key => new EyesClient(inputs.config.serverUrl, key),
       log: {info: m => core.info(m), warning: m => core.warning(m)},
       env: process.env
@@ -84,6 +97,38 @@ async function refresh(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
   } catch (e) {
     core.debug(`Could not write the job summary: ${e}`)
   }
+}
+
+/** `mode: merge`: merge a merged PR's Eyes baselines into its target branch. Fails the job unless that worked. */
+async function merge(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
+  if (!inputs.githubToken) throw new Error('`mode: merge` needs githubToken (the default is fine).')
+  if (!scm.owner || !scm.repo) throw new Error('Repository unknown; set `repo:`.')
+  if (scm.prNumber === undefined) {
+    throw new Error('`mode: merge` runs on `pull_request: closed` events, or with `pullRequest:` set.')
+  }
+  const octokit = getOctokit(inputs.githubToken)
+  const report = await runMerge(
+    inputs.merge,
+    {
+      github: new GitHubApi(octokit, scm.owner, scm.repo),
+      reporter: sha =>
+        inputs.config.checks ? new GitHubReporter(octokit, scm.owner!, scm.repo!, sha, 'CHECKS') : undefined,
+      eyes: key => new EyesClient(inputs.merge.serverUrl, key),
+      log: {info: m => core.info(m), warning: m => core.warning(m)},
+      repo: `${scm.owner}/${scm.repo}`
+    },
+    scm.prNumber
+  )
+  if (report.outcome) core.setOutput('baselineMerge', report.outcome)
+  const md = report.skipped
+    ? report.skipped
+    : `### ${report.ok ? '✅' : '❌'} ${report.title}\n\n${report.summary}`
+  try {
+    await core.summary.addRaw(`## Applitools baseline merge\n\n${md}\n`).write()
+  } catch (e) {
+    core.debug(`Could not write the job summary: ${e}`)
+  }
+  if (!report.ok) core.setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`)
 }
 
 /**
@@ -131,6 +176,9 @@ async function writeJobSummary(result: GateResult): Promise<void> {
     md += `Couldn't read Eyes results: ${result.problem}\n\n`
   }
   if (result.design) md += `### Design review: ${result.design.title}\n\n${result.design.detail}\n`
+  if (result.mergeNotes?.length) {
+    md += `### Baseline merges into this branch\n\n${result.mergeNotes.map(n => `- ${n.ok ? '' : '⚠️ '}${n.line}`).join('\n')}\n`
+  }
   try {
     await core.summary.addRaw(md).write()
   } catch (e) {

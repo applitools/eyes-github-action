@@ -30,6 +30,13 @@ export interface KeyInfo {
   permissions: string[]
 }
 
+export interface MergeResult {
+  merged: boolean
+  conflicts: number
+  /** Baseline changes merged. */
+  changes: number
+}
+
 export class EyesClient {
   private readonly serverUrl: string
 
@@ -129,6 +136,52 @@ export class EyesClient {
       }
     }
     return users
+  }
+
+  /**
+   * Starts merging one baseline branch into another, both `owner/repo/branch` (SPEC §10.7). Needs a merge key.
+   *
+   * @returns the task ID to poll
+   */
+  async startBranchMerge(source: string, target: string): Promise<string> {
+    const query = `SourceBranch=${enc(source)}&TargetBranch=${enc(target)}&OnlyCheck=false`
+    const response = await this.send('POST', `/api/baselines/branches/merge?${query}`)
+    if (response.status === 404) {
+      await response.body?.cancel()
+      throw new EyesHttpError(404, `Eyes has no baseline branch '${source}' or '${target}'`)
+    }
+    if (response.status !== 202) await requireSuccess(response, `starting a merge of ${source} into ${target}`)
+    await response.body?.cancel()
+    const location = response.headers.get('Location') ?? ''
+    const id = /\/tasks\/([^/?]+)/.exec(location)?.[1]
+    if (!id) throw new Error('Eyes accepted the merge but returned no task ID')
+    // Eyes sends the ID already URL-encoded ("…%7e1r"); decode it so it isn't encoded twice.
+    return decodeURIComponent(id)
+  }
+
+  /** True once the merge task has finished (HTTP 201), false while it runs (HTTP 200). */
+  async isTaskDone(taskId: string): Promise<boolean> {
+    const response = await this.send('GET', `/api/tasks/${enc(taskId)}/status`)
+    await response.body?.cancel()
+    if (response.status === 201) return true
+    if (response.status === 200) return false
+    await requireSuccess(response, `checking merge task ${taskId}`)
+    return false
+  }
+
+  async taskResult(taskId: string): Promise<MergeResult> {
+    const response = await this.send('GET', `/api/tasks/${enc(taskId)}/result`)
+    if (response.status === 404) {
+      await response.body?.cancel()
+      throw new EyesHttpError(404, "Eyes couldn't find one of the branches to merge")
+    }
+    await requireSuccess(response, `reading merge task ${taskId}`)
+    const json = await this.json(response)
+    return {
+      merged: json?.merged === true,
+      conflicts: Number(json?.conflicts) || 0,
+      changes: Array.isArray(json?.changes) ? json.changes.length : 0
+    }
   }
 
   private async send(method: string, pathAndQuery: string, withKey = true): Promise<Response> {

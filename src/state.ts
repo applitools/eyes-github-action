@@ -7,6 +7,8 @@ export interface GateState {
   v: 1
   /** Pointer ID the SDKs were given. */
   batchId: string
+  /** Eyes branch the tests ran on (`owner/repo/branch`), which the baseline merge merges from (SPEC §11). */
+  branchName?: string
   /** Eyes' own batch ID, for session lookups. */
   eyesBatchId?: string
   /** Tests that had visual changes when the run finished. */

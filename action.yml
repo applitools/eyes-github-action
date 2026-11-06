@@ -9,7 +9,7 @@ branding:
 
 inputs:
   mode:
-    description: '`run` (default): run the tests and post the checks. `refresh`: run no tests; re-read Eyes for the event''s pull request, `pullRequest`, or every open PR, and update the checks that changed.'
+    description: '`run` (default): run the tests and post the checks. `refresh`: run no tests; re-read Eyes for the event''s pull request, `pullRequest`, or every open PR, and update the checks that changed. `merge`: on `pull_request: closed`, merge a merged PR''s Eyes baselines into its target branch.'
     required: false
     default: 'run'
   run:
@@ -24,6 +24,13 @@ inputs:
   readApiKey:
     description: 'Eyes read key (reads results and teams). Run keys usually can''t read results. Defaults to APPLITOOLS_READ_KEY, then the run key.'
     required: false
+  mergeApiKey:
+    description: 'Eyes merge key, for `mode: merge`. Defaults to the APPLITOOLS_MERGE_KEY environment variable, then the run key (which Eyes usually refuses for merges).'
+    required: false
+  mergeTimeout:
+    description: 'Seconds to wait for Eyes to merge baselines.'
+    required: false
+    default: '600'
   serverUrl:
     description: 'Eyes server, for dedicated clouds and on-prem.'
     required: false
@@ -113,6 +120,8 @@ inputs:
     required: false
 
 outputs:
+  baselineMerge:
+    description: '`mode: merge` outcome: MERGED, NOTHING_TO_MERGE, CONFLICTS, REFUSED, NO_KEY, TIMED_OUT or FAILED.'
   outcome:
     description: 'PASSED, CHANGES, FAILED or NO_RESULTS.'
   summary:

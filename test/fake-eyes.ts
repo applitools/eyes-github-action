@@ -32,7 +32,14 @@ export class FakeEyes {
   readonly batches = new Map<string, FakeBatch>()
   readonly requests: Request[] = []
   /** Keys and what they may do. */
-  readonly keys = new Map<string, {read: boolean; orgId?: string; permissions?: string[]}>()
+  readonly keys = new Map<string, {read: boolean; merge?: boolean; orgId?: string; permissions?: string[]}>()
+  /** Baseline branches that exist, for merges. */
+  readonly branches = new Set<string>()
+  /** Merges requested, as `source → target`. */
+  readonly merges: string[] = []
+  /** What the next merge reports, and how many status polls say it's still running. */
+  mergeResult = {merged: true, conflicts: 0, changes: 2}
+  mergeRunning = 0
   teams: {id: string; name: string; members: Record<string, object>}[] = []
   /** Only accept the key as a query parameter on close (older servers). */
   closeNeedsQueryKey = false
@@ -108,6 +115,27 @@ export class FakeEyes {
     if (parts[1] === 'admin' && parts[4] === 'accounts') {
       if (!key.read || parts[3] !== key.orgId) return send(403, {})
       return send(200, this.teams)
+    }
+    // POST /api/baselines/branches/merge?SourceBranch=…&TargetBranch=…
+    if (req.method === 'POST' && url.pathname === '/api/baselines/branches/merge') {
+      if (!key.merge) return send(403, {})
+      const source = url.searchParams.get('SourceBranch') ?? ''
+      const target = url.searchParams.get('TargetBranch') ?? ''
+      if (!this.branches.has(source) || !this.branches.has(target)) return send(404, {})
+      this.merges.push(`${source} → ${target}`)
+      // Eyes sends the task ID URL-encoded.
+      res.writeHead(202, {Location: `${this.url}/api/tasks/merge%7e1r/status`}).end()
+      return
+    }
+    // GET /api/tasks/{id}/status and /result
+    if (req.method === 'GET' && parts[1] === 'tasks') {
+      if (parts[2] !== 'merge~1r') return send(404, {})
+      if (parts[3] === 'status') return this.mergeRunning-- > 0 ? send(200, {}) : send(201, {})
+      return send(200, {
+        merged: this.mergeResult.merged,
+        conflicts: this.mergeResult.conflicts,
+        changes: Array.from({length: this.mergeResult.changes}, (_, i) => ({id: `c${i}`}))
+      })
     }
     // GET /api/sessions/batches/{eyesBatchId}/{sessionId}
     if (req.method === 'GET' && parts[1] === 'sessions' && parts.length === 5) {

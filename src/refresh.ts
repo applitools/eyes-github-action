@@ -5,7 +5,7 @@
  */
 import {ENV_DESIGN_REVIEW} from './context.js'
 import {DesignInputs, Verdict} from './design-review.js'
-import {CheckResult, DESIGN_REVIEW, designReviewResult, visualTestsCompleted} from './checks.js'
+import {CheckResult, DESIGN_REVIEW, VISUAL_TESTS, designReviewResult, visualTestsCompleted} from './checks.js'
 import {EyesClient, EyesHttpError} from './eyes.js'
 import {GateConfig, Logger, evaluateDesign, parseBool} from './gate.js'
 import {applyExpectations} from './results.js'
@@ -31,14 +31,16 @@ export interface PostedCheck {
   conclusion: string | null
   title: string | null
   summary: string | null
+  /** The check's page on GitHub. */
+  url?: string
 }
 
 /** The GitHub side of a refresh. */
 export interface RefreshGitHub {
   /** The one PR asked for, or every open PR. */
   pullRequests(only?: number): Promise<PullRequest[]>
-  /** Visual tests and Design review check runs on a commit, any app, any order. */
-  checks(sha: string): Promise<PostedCheck[]>
+  /** Check runs with these names on a commit, any app, any order. */
+  checks(sha: string, names: string[]): Promise<PostedCheck[]>
   update(id: number, result: CheckResult): Promise<void>
   create(sha: string, result: CheckResult, externalId: string): Promise<void>
 }
@@ -87,7 +89,7 @@ export async function refreshPullRequest(
   deps: RefreshDeps,
   pr: PullRequest
 ): Promise<PullRequestRefresh> {
-  const found = latestRun(await deps.github.checks(pr.headSha))
+  const found = latestRun(await deps.github.checks(pr.headSha, [VISUAL_TESTS, DESIGN_REVIEW]))
   if ('skipped' in found) return {pr: pr.number, skipped: found.skipped}
   const {visual, design, state} = found
 

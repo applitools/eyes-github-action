@@ -3,8 +3,9 @@ import * as core from '@actions/core'
 import {parseDesigners} from './designers.js'
 import {ChangesPolicy, GateConfig, parseBool} from './gate.js'
 import {Reporting} from './github.js'
+import {MergeConfig} from './merge.js'
 
-export type Mode = 'RUN' | 'REFRESH'
+export type Mode = 'RUN' | 'REFRESH' | 'MERGE'
 
 export interface ActionInputs {
   mode: Mode
@@ -14,14 +15,17 @@ export interface ActionInputs {
   githubToken?: string
   githubReporting: Reporting
   config: GateConfig
+  merge: MergeConfig
 }
 
 export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
-  const mode = oneOf<Mode>('mode', ['RUN', 'REFRESH'], 'RUN')
+  const mode = oneOf<Mode>('mode', ['RUN', 'REFRESH', 'MERGE'], 'RUN')
   const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY
-  // A refresh only reads, so the read key is enough.
-  const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : undefined)
-  if (!apiKey) {
+  const mergeApiKey = input('mergeApiKey') ?? env.APPLITOOLS_MERGE_KEY
+  // A refresh only reads, so the read key is enough. A merge without a key is reported on the PR, not thrown.
+  const apiKey =
+    input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : mode === 'MERGE' ? '' : undefined)
+  if (apiKey === undefined) {
     throw new Error(
       mode === 'REFRESH'
         ? 'No Eyes read key. Pass `readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}` to the action.'
@@ -29,15 +33,17 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
             '(or set APPLITOOLS_API_KEY in the step environment).'
     )
   }
-  core.setSecret(apiKey)
-  if (readApiKey) core.setSecret(readApiKey)
+  for (const key of [apiKey, readApiKey, mergeApiKey]) if (key) core.setSecret(key)
 
   const run = input('run')
   if (mode === 'RUN' && !run) throw new Error('`run` is required: the command that runs your Eyes tests.')
   const githubReporting = oneOf<Reporting>('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS')
-  if (mode === 'REFRESH' && githubReporting === 'STATUSES') {
-    throw new Error('`mode: refresh` needs check runs (the run state lives in them); remove `githubReporting: STATUSES`.')
+  if (mode !== 'RUN' && githubReporting === 'STATUSES') {
+    throw new Error(
+      `\`mode: ${mode.toLowerCase()}\` needs check runs (the run state lives in them); remove \`githubReporting: STATUSES\`.`
+    )
   }
+  const serverUrl = input('serverUrl') ?? env.APPLITOOLS_SERVER_URL ?? 'https://eyes.applitools.com'
 
   return {
     mode,
@@ -48,7 +54,7 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
     config: {
       apiKey,
       readApiKey,
-      serverUrl: input('serverUrl') ?? env.APPLITOOLS_SERVER_URL ?? 'https://eyes.applitools.com',
+      serverUrl,
       batch: {
         batchId: expandVars(input('batchId'), env),
         batchName: expandVars(input('batchName'), env),
@@ -74,7 +80,9 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
       designers: parseDesigners(input('designers')),
       designReviewByDefault: bool('designReviewByDefault', false),
       designReviewCheck: bool('designReviewCheck', true)
-    }
+    },
+    // Merge key, then the run key (SPEC §11).
+    merge: {serverUrl, mergeApiKey: mergeApiKey || apiKey || undefined, mergeTimeout: positiveInt('mergeTimeout') ?? 600}
   }
 }
 

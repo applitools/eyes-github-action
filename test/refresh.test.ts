@@ -49,7 +49,7 @@ function deps(): RefreshDeps {
   return {
     github: {
       pullRequests: async only => prs.filter(p => only === undefined || p.number === only),
-      checks: async sha => checks.get(sha) ?? [],
+      checks: async (sha, names) => (checks.get(sha) ?? []).filter(c => names.includes(c.name)),
       update: async (id, result) => void updates.push({id, result}),
       create: async (sha, result, externalId) => void creates.push({sha, result, externalId})
     },

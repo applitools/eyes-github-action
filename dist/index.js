@@ -37786,6 +37786,53 @@ class EyesClient {
         }
         return users;
     }
+    /**
+     * Starts merging one baseline branch into another, both `owner/repo/branch` (SPEC §10.7). Needs a merge key.
+     *
+     * @returns the task ID to poll
+     */
+    async startBranchMerge(source, target) {
+        const query = `SourceBranch=${enc(source)}&TargetBranch=${enc(target)}&OnlyCheck=false`;
+        const response = await this.send('POST', `/api/baselines/branches/merge?${query}`);
+        if (response.status === 404) {
+            await response.body?.cancel();
+            throw new EyesHttpError(404, `Eyes has no baseline branch '${source}' or '${target}'`);
+        }
+        if (response.status !== 202)
+            await requireSuccess(response, `starting a merge of ${source} into ${target}`);
+        await response.body?.cancel();
+        const location = response.headers.get('Location') ?? '';
+        const id = /\/tasks\/([^/?]+)/.exec(location)?.[1];
+        if (!id)
+            throw new Error('Eyes accepted the merge but returned no task ID');
+        // Eyes sends the ID already URL-encoded ("…%7e1r"); decode it so it isn't encoded twice.
+        return decodeURIComponent(id);
+    }
+    /** True once the merge task has finished (HTTP 201), false while it runs (HTTP 200). */
+    async isTaskDone(taskId) {
+        const response = await this.send('GET', `/api/tasks/${enc(taskId)}/status`);
+        await response.body?.cancel();
+        if (response.status === 201)
+            return true;
+        if (response.status === 200)
+            return false;
+        await requireSuccess(response, `checking merge task ${taskId}`);
+        return false;
+    }
+    async taskResult(taskId) {
+        const response = await this.send('GET', `/api/tasks/${enc(taskId)}/result`);
+        if (response.status === 404) {
+            await response.body?.cancel();
+            throw new EyesHttpError(404, "Eyes couldn't find one of the branches to merge");
+        }
+        await requireSuccess(response, `reading merge task ${taskId}`);
+        const json = await this.json(response);
+        return {
+            merged: json?.merged === true,
+            conflicts: Number(json?.conflicts) || 0,
+            changes: Array.isArray(json?.changes) ? json.changes.length : 0
+        };
+    }
     async send(method, pathAndQuery, withKey = true) {
         const headers = { Accept: 'application/json' };
         if (withKey)
@@ -38160,12 +38207,163 @@ function decodeState(summary) {
     }
 }
 
+;// CONCATENATED MODULE: ./src/merge.ts
+/**
+ * Baseline merge (SPEC §10.7, §11): when a PR merges, merge its Eyes baseline branch into the target branch's, so the
+ * changes reviewers accepted don't show up again as diffs there. Every outcome, including skips, is posted as
+ * "Applitools / Baseline merge" on the PR's last commit and fails the job when something needs fixing; the next build of
+ * the target branch repeats it before its tests run.
+ */
+
+
+
+const OK = ['MERGED', 'NOTHING_TO_MERGE'];
+async function runMerge(config, deps, prNumber) {
+    const { log } = deps;
+    const pr = await deps.github.pullRequest(prNumber);
+    if (!pr.merged) {
+        const skipped = `PR #${pr.number} closed without merging, so its baselines stay on their branch.`;
+        log.info(skipped);
+        return { pr: pr.number, skipped, ok: true };
+    }
+    // The branch the tests ran on, as the gated run recorded it; derived from the PR when no run recorded one.
+    const state = (await deps.github.checks(pr.headSha, [VISUAL_TESTS]))
+        .sort((a, b) => b.id - a.id)
+        .map(c => decodeState(c.summary))
+        .find(s => s !== undefined);
+    const source = state?.branchName ?? `${deps.repo}/${pr.headRef}`;
+    const target = `${deps.repo}/${pr.baseRef}`;
+    const how = `Eyes baseline branch \`${source}\` → \`${target}\``;
+    const fixThenRetry = `\n\nOnce that's fixed, re-run this job to retry, or merge by hand in Eyes under **Compare & merge branches** ` +
+        `(\`${source}\` → \`${target}\`).`;
+    const reporter = deps.reporter(pr.headSha);
+    await reporter?.publish({
+        name: BASELINE_MERGE,
+        status: 'in_progress',
+        title: `Merging baselines into ${pr.baseRef}`,
+        summary: `${how}.`
+    });
+    const report = async (outcome, title, summary) => {
+        const ok = OK.includes(outcome);
+        const full = ok ? summary : summary + fixThenRetry;
+        await reporter?.publish(mergeCheck(ok, title, full));
+        if (ok)
+            log.info(`Baseline merge from PR #${pr.number}: ${title}. ${plain(summary)}`);
+        else
+            log.warning(`Baseline merge from PR #${pr.number}: ${title}. ${plain(full)}`);
+        return { pr: pr.number, outcome, ok, title, summary: full };
+    };
+    if (!config.mergeApiKey) {
+        return report('NO_KEY', 'Baseline merge skipped', `No Eyes key to merge \`${source}\` into \`${target}\`. Pass an Eyes merge key as ` +
+            '`mergeApiKey: ${{ secrets.APPLITOOLS_MERGE_KEY }}`.');
+    }
+    const eyes = deps.eyes(config.mergeApiKey);
+    const sleep = deps.sleep ?? ((ms) => new Promise(r => setTimeout(r, ms)));
+    try {
+        const task = await eyes.startBranchMerge(source, target);
+        log.info(`Merging ${source} into ${target} (Eyes task ${task})`);
+        const deadline = Date.now() + config.mergeTimeout * 1000;
+        while (!(await eyes.isTaskDone(task))) {
+            if (Date.now() > deadline) {
+                return report('TIMED_OUT', 'Baseline merge timed out', `Eyes was still merging \`${source}\` into \`${target}\` after ${config.mergeTimeout}s. Check the branch in Eyes: ` +
+                    'the merge may still finish there.');
+            }
+            await sleep(deps.pollMs ?? 5000);
+        }
+        const result = await eyes.taskResult(task);
+        if (result.conflicts > 0) {
+            return report('CONFLICTS', `${result.conflicts} baseline conflict${result.conflicts === 1 ? '' : 's'}`, `The same checkpoints changed on \`${pr.baseRef}\` too. Resolve them in Eyes under **Compare & merge branches** ` +
+                `(\`${source}\` → \`${target}\`).`);
+        }
+        if (result.merged) {
+            return report('MERGED', `Baselines merged into ${pr.baseRef}`, `${result.changes} baseline change${result.changes === 1 ? '' : 's'} from \`${source}\` now apply to \`${target}\`.`);
+        }
+        return report('NOTHING_TO_MERGE', 'Nothing to merge', `\`${source}\` had no baseline changes for \`${target}\`.`);
+    }
+    catch (e) {
+        if (e instanceof EyesHttpError && e.unauthorized) {
+            return report('REFUSED', 'Eyes refused the baseline merge', `HTTP ${e.status}: only Eyes **merge** keys (created for a team and a user) can merge baselines. Add one as the ` +
+                'secret `APPLITOOLS_MERGE_KEY` and pass it as `mergeApiKey`.');
+        }
+        let detail = e instanceof Error ? e.message : String(e);
+        if (e instanceof EyesHttpError && e.status === 404 && !state) {
+            detail +=
+                ". No visual test run with Eyes results was found on this PR's last commit; if its tests never ran, there's " +
+                    'nothing to merge.';
+        }
+        return report('FAILED', 'Baseline merge failed', `${detail}.`.replace(/\.\.$/, '.'));
+    }
+}
+function mergeCheck(ok, title, summary) {
+    return { name: BASELINE_MERGE, status: 'completed', conclusion: ok ? 'success' : 'failure', title, summary };
+}
+/**
+ * For a branch build (not a PR): before its tests run, waits a little for baseline merges from the PRs that produced
+ * this commit, so the tests don't compare against baselines without them, then says how each merge went. A failed or
+ * skipped merge means the tests may flag the changes the PR accepted, so it's a warning.
+ */
+async function mergeNotesBeforeTests(github, sha, branch, log, sleep, waitMs = 60_000, pollMs = 5000) {
+    const prs = (await github.pullRequestsForCommit(sha)).filter(p => p.merged && p.baseRef === branch);
+    const notes = [];
+    const started = Date.now();
+    for (const pr of prs) {
+        const latest = async () => (await github.checks(pr.headSha, [BASELINE_MERGE])).sort((a, b) => b.id - a.id)[0];
+        let check = await latest();
+        if (check?.status !== 'completed' && check !== undefined) {
+            log.info(`A baseline merge from PR #${pr.number} is running; waiting up to ${Math.round(waitMs / 1000)}s for it before the tests start`);
+            while (check?.status !== 'completed' && Date.now() - started < waitMs) {
+                await sleep(pollMs);
+                check = await latest();
+            }
+        }
+        let note;
+        if (!check) {
+            note = { pr: pr.number, ok: true, line: `No baseline merge result from PR #${pr.number} (is the merge workflow set up?)` };
+        }
+        else if (check.status !== 'completed') {
+            note = {
+                pr: pr.number,
+                ok: false,
+                line: `The baseline merge from PR #${pr.number} was still running after ${Math.round((Date.now() - started) / 1000)}s. ` +
+                    "This build's tests may flag changes the PR accepted; if they do, re-run this job once the merge is done."
+            };
+        }
+        else if (check.conclusion === 'success') {
+            note = { pr: pr.number, ok: true, line: `Baseline merge from PR #${pr.number}: ${check.title}. ${plain(check.summary ?? '')}` };
+        }
+        else {
+            note = {
+                pr: pr.number,
+                ok: false,
+                line: `Baseline merge from PR #${pr.number}: ${check.title}. Until the baselines are merged, this build's tests may ` +
+                    `flag the changes the PR accepted.${check.url ? ` Details: ${check.url}` : ''}`
+            };
+        }
+        if (note.ok)
+            log.info(note.line);
+        else
+            log.warning(note.line);
+        notes.push(note);
+    }
+    return notes;
+}
+/** Markdown for the Visual tests check when a merge into this branch went wrong; empty otherwise. */
+function mergeNotesMarkdown(notes) {
+    const problems = notes.filter(n => !n.ok);
+    return problems.length === 0 ? '' : `\n**Baseline merges**\n\n${problems.map(n => `- ⚠️ ${n.line}`).join('\n')}\n`;
+}
+/** Check summaries are Markdown; logs aren't. */
+function plain(markdown) {
+    return markdown.replace(/\*\*|`/g, '').replace(/\s*\n+\s*/g, ' ').trim();
+}
+
 ;// CONCATENATED MODULE: ./src/gate.ts
 /**
  * One gated run (SPEC §4): set up Eyes through the environment, run the tests, close the batch, wait for rendering,
  * read the results, and post "Visual tests" and "Design review". Problems talking to Eyes or GitHub never fail the run
  * by themselves; they're logged, and the PR results reflect them.
  */
+
 
 
 
@@ -38192,7 +38390,12 @@ async function runGate(config, deps) {
     }
     log.info(`Server ${config.serverUrl}`);
     const reporter = config.checks ? deps.reporter : undefined;
+    let mergeNotes;
     const publish = async (result, externalId) => {
+        // A failed merge into this branch explains diffs the merged PR already accepted, so it goes with the results.
+        if (result.name === VISUAL_TESTS && result.status === 'completed' && mergeNotes) {
+            result = { ...result, summary: result.summary + mergeNotesMarkdown(mergeNotes) };
+        }
         posted.push(result);
         await reporter?.publish(result, externalId);
     };
@@ -38221,8 +38424,16 @@ async function runGate(config, deps) {
     };
     const eyes = deps.eyes(config.apiKey);
     const keyProblem = await checkRunKey(eyes, log);
+    if (!isPullRequest(scm) && deps.mergeNotes) {
+        try {
+            mergeNotes = await deps.mergeNotes();
+        }
+        catch (e) {
+            log.warning(`Could not check baseline merges into this branch: ${message(e)}`);
+        }
+    }
     const commandExitCode = await deps.runCommand(env);
-    const base = { batchId: batch.batchId, commandExitCode, posted };
+    const base = { batchId: batch.batchId, commandExitCode, posted, mergeNotes };
     if (!config.closeBatch) {
         log.info(`closeBatch: false, leaving batch ${batch.batchId} open`);
     }
@@ -38260,6 +38471,7 @@ async function runGate(config, deps) {
     visual.summary += encodeState({
         v: 1,
         batchId: batch.batchId,
+        branchName: batch.branchName,
         eyesBatchId: results.eyesBatchId,
         changed,
         expectTests: config.expectations.minTests,
@@ -38477,8 +38689,11 @@ class GitHubReporter {
         }
     }
 }
-/** Reads PRs and check runs and updates checks for a refresh. Unlike publishing, errors are thrown to the caller. */
-class GitHubRefresh {
+/**
+ * Reads PRs and check runs and updates checks, for refreshes and baseline merges. Unlike publishing, errors are thrown
+ * to the caller.
+ */
+class GitHubApi {
     octokit;
     owner;
     repo;
@@ -38501,9 +38716,21 @@ class GitHubRefresh {
         const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
         return prs.map(toRef);
     }
-    async checks(sha) {
+    async pullRequest(n) {
+        const { data } = await this.octokit.rest.pulls.get({ owner: this.owner, repo: this.repo, pull_number: n });
+        return toMerged(data);
+    }
+    async pullRequestsForCommit(sha) {
+        const { data } = await this.octokit.rest.repos.listPullRequestsAssociatedWithCommit({
+            owner: this.owner,
+            repo: this.repo,
+            commit_sha: sha
+        });
+        return data.map(toMerged);
+    }
+    async checks(sha, names) {
         const runs = [];
-        for (const name of [VISUAL_TESTS, DESIGN_REVIEW]) {
+        for (const name of names) {
             const { data } = await this.octokit.rest.checks.listForRef({
                 owner: this.owner,
                 repo: this.repo,
@@ -38521,7 +38748,8 @@ class GitHubRefresh {
             status: r.status,
             conclusion: r.conclusion,
             title: r.output.title,
-            summary: r.output.summary
+            summary: r.output.summary,
+            url: r.html_url ?? undefined
         }));
     }
     async update(id, result) {
@@ -38551,6 +38779,16 @@ class GitHubRefresh {
         });
     }
 }
+function toMerged(pr) {
+    return {
+        number: pr.number,
+        title: pr.title,
+        merged: pr.merged_at !== null,
+        headSha: pr.head.sha,
+        headRef: pr.head.ref,
+        baseRef: pr.base.ref
+    };
+}
 /** Check summaries are limited to 65535 characters. */
 function truncate(summary) {
     const max = 65_000;
@@ -38571,26 +38809,28 @@ function describeError(e) {
 
 
 function readInputs(env = process.env) {
-    const mode = oneOf('mode', ['RUN', 'REFRESH'], 'RUN');
+    const mode = oneOf('mode', ['RUN', 'REFRESH', 'MERGE'], 'RUN');
     const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY;
-    // A refresh only reads, so the read key is enough.
-    const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : undefined);
-    if (!apiKey) {
+    const mergeApiKey = input('mergeApiKey') ?? env.APPLITOOLS_MERGE_KEY;
+    // A refresh only reads, so the read key is enough. A merge without a key is reported on the PR, not thrown.
+    const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : mode === 'MERGE' ? '' : undefined);
+    if (apiKey === undefined) {
         throw new Error(mode === 'REFRESH'
             ? 'No Eyes read key. Pass `readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}` to the action.'
             : 'No Eyes API key. Pass `apiKey: ${{ secrets.APPLITOOLS_API_KEY }}` to the action ' +
                 '(or set APPLITOOLS_API_KEY in the step environment).');
     }
-    core_setSecret(apiKey);
-    if (readApiKey)
-        core_setSecret(readApiKey);
+    for (const key of [apiKey, readApiKey, mergeApiKey])
+        if (key)
+            core_setSecret(key);
     const run = input('run');
     if (mode === 'RUN' && !run)
         throw new Error('`run` is required: the command that runs your Eyes tests.');
     const githubReporting = oneOf('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS');
-    if (mode === 'REFRESH' && githubReporting === 'STATUSES') {
-        throw new Error('`mode: refresh` needs check runs (the run state lives in them); remove `githubReporting: STATUSES`.');
+    if (mode !== 'RUN' && githubReporting === 'STATUSES') {
+        throw new Error(`\`mode: ${mode.toLowerCase()}\` needs check runs (the run state lives in them); remove \`githubReporting: STATUSES\`.`);
     }
+    const serverUrl = input('serverUrl') ?? env.APPLITOOLS_SERVER_URL ?? 'https://eyes.applitools.com';
     return {
         mode,
         run,
@@ -38600,7 +38840,7 @@ function readInputs(env = process.env) {
         config: {
             apiKey,
             readApiKey,
-            serverUrl: input('serverUrl') ?? env.APPLITOOLS_SERVER_URL ?? 'https://eyes.applitools.com',
+            serverUrl,
             batch: {
                 batchId: expandVars(input('batchId'), env),
                 batchName: expandVars(input('batchName'), env),
@@ -38626,7 +38866,9 @@ function readInputs(env = process.env) {
             designers: parseDesigners(input('designers')),
             designReviewByDefault: bool('designReviewByDefault', false),
             designReviewCheck: bool('designReviewCheck', true)
-        }
+        },
+        // Merge key, then the run key (SPEC §11).
+        merge: { serverUrl, mergeApiKey: mergeApiKey || apiKey || undefined, mergeTimeout: positiveInt('mergeTimeout') ?? 600 }
     };
 }
 /** `${VAR}` references, like the Jenkins step options (SPEC §2). Unknown variables are left as they are. */
@@ -38696,7 +38938,7 @@ async function runRefresh(config, deps, only) {
     return done;
 }
 async function refreshPullRequest(config, deps, pr) {
-    const found = latestRun(await deps.github.checks(pr.headSha));
+    const found = latestRun(await deps.github.checks(pr.headSha, [VISUAL_TESTS, DESIGN_REVIEW]));
     if ('skipped' in found)
         return { pr: pr.number, skipped: found.skipped };
     const { visual, design, state } = found;
@@ -38799,6 +39041,7 @@ function refresh_message(e) {
 
 
 
+
 async function main() {
     try {
         const inputs = readInputs();
@@ -38806,6 +39049,8 @@ async function main() {
         const scm = withOverrides(eventScm, inputs.config.scm);
         if (inputs.mode === 'REFRESH')
             return await refresh(inputs, scm);
+        if (inputs.mode === 'MERGE')
+            return await main_merge(inputs, scm);
         const logUrl = `${github_context.serverUrl}/${github_context.repo.owner}/${github_context.repo.repo}/actions/runs/${github_context.runId}`;
         let reporter;
         const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined;
@@ -38828,6 +39073,9 @@ async function main() {
             env: process.env,
             scm: eventScm,
             fallbackLabel: `${github_context.workflow} #${github_context.runNumber}`,
+            mergeNotes: octokit && scm.owner && scm.repo && scm.commitSha && scm.branch
+                ? () => mergeNotesBeforeTests(new GitHubApi(octokit, scm.owner, scm.repo), scm.commitSha, scm.branch, { info: m => info(m), warning: m => warning(m) }, ms => new Promise(r => setTimeout(r, ms)))
+                : undefined,
             currentLabels: async () => {
                 if (!octokit || !scm.owner || !scm.repo || scm.prNumber === undefined)
                     return undefined;
@@ -38854,7 +39102,7 @@ async function refresh(inputs, scm) {
     if (!scm.owner || !scm.repo)
         throw new Error('Repository unknown; set `repo:`.');
     const outcomes = await runRefresh(inputs.config, {
-        github: new GitHubRefresh(getOctokit(inputs.githubToken), scm.owner, scm.repo),
+        github: new GitHubApi(getOctokit(inputs.githubToken), scm.owner, scm.repo),
         eyes: key => new EyesClient(inputs.config.serverUrl, key),
         log: { info: m => info(m), warning: m => warning(m) },
         env: process.env
@@ -38866,6 +39114,37 @@ async function refresh(inputs, scm) {
     catch (e) {
         core_debug(`Could not write the job summary: ${e}`);
     }
+}
+/** `mode: merge`: merge a merged PR's Eyes baselines into its target branch. Fails the job unless that worked. */
+async function main_merge(inputs, scm) {
+    if (!inputs.githubToken)
+        throw new Error('`mode: merge` needs githubToken (the default is fine).');
+    if (!scm.owner || !scm.repo)
+        throw new Error('Repository unknown; set `repo:`.');
+    if (scm.prNumber === undefined) {
+        throw new Error('`mode: merge` runs on `pull_request: closed` events, or with `pullRequest:` set.');
+    }
+    const octokit = getOctokit(inputs.githubToken);
+    const report = await runMerge(inputs.merge, {
+        github: new GitHubApi(octokit, scm.owner, scm.repo),
+        reporter: sha => inputs.config.checks ? new GitHubReporter(octokit, scm.owner, scm.repo, sha, 'CHECKS') : undefined,
+        eyes: key => new EyesClient(inputs.merge.serverUrl, key),
+        log: { info: m => info(m), warning: m => warning(m) },
+        repo: `${scm.owner}/${scm.repo}`
+    }, scm.prNumber);
+    if (report.outcome)
+        setOutput('baselineMerge', report.outcome);
+    const md = report.skipped
+        ? report.skipped
+        : `### ${report.ok ? '✅' : '❌'} ${report.title}\n\n${report.summary}`;
+    try {
+        await summary.addRaw(`## Applitools baseline merge\n\n${md}\n`).write();
+    }
+    catch (e) {
+        core_debug(`Could not write the job summary: ${e}`);
+    }
+    if (!report.ok)
+        setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`);
 }
 /**
  * Runs the user's command with bash, like a `run:` step (`bash --noprofile --norc -eo pipefail`). Action inputs
@@ -38915,6 +39194,9 @@ async function writeJobSummary(result) {
     }
     if (result.design)
         md += `### Design review: ${result.design.title}\n\n${result.design.detail}\n`;
+    if (result.mergeNotes?.length) {
+        md += `### Baseline merges into this branch\n\n${result.mergeNotes.map(n => `- ${n.ok ? '' : '⚠️ '}${n.line}`).join('\n')}\n`;
+    }
     try {
         await summary.addRaw(md).write();
     }

@@ -5,7 +5,8 @@
  */
 import * as core from '@actions/core'
 import {getOctokit} from '@actions/github'
-import {CheckResult, DESIGN_REVIEW, VISUAL_TESTS, toStatus} from './checks.js'
+import {CheckResult, toStatus} from './checks.js'
+import {MergeGitHub, MergedPullRequest} from './merge.js'
 import {PostedCheck, PullRequest, RefreshGitHub} from './refresh.js'
 
 export type Reporting = 'CHECKS' | 'STATUSES'
@@ -71,8 +72,11 @@ export class GitHubReporter implements Reporter {
   }
 }
 
-/** Reads PRs and check runs and updates checks for a refresh. Unlike publishing, errors are thrown to the caller. */
-export class GitHubRefresh implements RefreshGitHub {
+/**
+ * Reads PRs and check runs and updates checks, for refreshes and baseline merges. Unlike publishing, errors are thrown
+ * to the caller.
+ */
+export class GitHubApi implements RefreshGitHub, MergeGitHub {
   constructor(
     private readonly octokit: Octokit,
     private readonly owner: string,
@@ -94,9 +98,23 @@ export class GitHubRefresh implements RefreshGitHub {
     return prs.map(toRef)
   }
 
-  async checks(sha: string): Promise<PostedCheck[]> {
+  async pullRequest(n: number): Promise<MergedPullRequest> {
+    const {data} = await this.octokit.rest.pulls.get({owner: this.owner, repo: this.repo, pull_number: n})
+    return toMerged(data)
+  }
+
+  async pullRequestsForCommit(sha: string): Promise<MergedPullRequest[]> {
+    const {data} = await this.octokit.rest.repos.listPullRequestsAssociatedWithCommit({
+      owner: this.owner,
+      repo: this.repo,
+      commit_sha: sha
+    })
+    return data.map(toMerged)
+  }
+
+  async checks(sha: string, names: string[]): Promise<PostedCheck[]> {
     const runs = []
-    for (const name of [VISUAL_TESTS, DESIGN_REVIEW]) {
+    for (const name of names) {
       const {data} = await this.octokit.rest.checks.listForRef({
         owner: this.owner,
         repo: this.repo,
@@ -114,7 +132,8 @@ export class GitHubRefresh implements RefreshGitHub {
       status: r.status,
       conclusion: r.conclusion,
       title: r.output.title,
-      summary: r.output.summary
+      summary: r.output.summary,
+      url: r.html_url ?? undefined
     }))
   }
 
@@ -144,6 +163,23 @@ export class GitHubRefresh implements RefreshGitHub {
       external_id: externalId,
       output: {title: result.title, summary: truncate(result.summary)}
     })
+  }
+}
+
+function toMerged(pr: {
+  number: number
+  title: string
+  merged_at: string | null
+  head: {sha: string; ref: string}
+  base: {ref: string}
+}): MergedPullRequest {
+  return {
+    number: pr.number,
+    title: pr.title,
+    merged: pr.merged_at !== null,
+    headSha: pr.head.sha,
+    headRef: pr.head.ref,
+    baseRef: pr.base.ref
   }
 }
 

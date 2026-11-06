@@ -107,6 +107,7 @@ describe('runGate', () => {
     expect(decodeState(last('Applitools / Visual tests')!.summary)).toEqual({
       v: 1,
       batchId: 'head-sha',
+      branchName: 'acme/web/feature',
       eyesBatchId: 'eyes-1',
       changed: ['s1'],
       expectTests: 2
@@ -126,6 +127,29 @@ describe('runGate', () => {
     expect((await runGate(config({onChanges: 'FAILURE'}), deps())).failure).toBe('Failed: visual changes to review')
     const quiet = await runGate(config({onChanges: 'SUCCESS'}), deps())
     expect(quiet.failure ?? quiet.warning).toBeUndefined()
+  })
+
+  it('reports a failed baseline merge into a branch build, before its tests and with its results', async () => {
+    eyes.batches.set('main-sha', {eyesBatchId: 'e', name: 'n', tests: [{testId: 's1', testName: 'a', status: 'unresolved'}]})
+    const push = scmFromEvent({eventName: 'push', sha: 'main-sha', ref: 'refs/heads/main', repo: {owner: 'acme', repo: 'web'}, payload: {}})
+    const order: string[] = []
+    const result = await runGate(
+      config(),
+      deps({
+        scm: push,
+        mergeNotes: async () => (order.push('notes'), [{pr: 7, ok: false, line: 'Baseline merge from PR #7: 1 baseline conflict.'}]),
+        runCommand: async () => (order.push('tests'), 0)
+      })
+    )
+    expect(order).toEqual(['notes', 'tests'])
+    expect(last('Applitools / Visual tests')!.summary).toContain('- ⚠️ Baseline merge from PR #7: 1 baseline conflict.')
+    expect(result.mergeNotes).toHaveLength(1)
+
+    // PR builds don't look for merges.
+    posted = []
+    let asked = false
+    await runGate(config(), deps({mergeNotes: async () => ((asked = true), [])}))
+    expect(asked).toBe(false)
   })
 
   it('posts Design review as skipped when not requested', async () => {

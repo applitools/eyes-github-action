@@ -25,8 +25,10 @@ import {
 } from './results.js'
 import {DesignInputs, Verdict, evaluate, isForced, isRequired} from './design-review.js'
 import {Designers, isTeam, plainDesigners, resolveDesigners} from './designers.js'
+import {MergeNote, mergeNotesMarkdown} from './merge.js'
 import {
   CheckResult,
+  VISUAL_TESTS,
   designReviewResult,
   designReviewStarted,
   visualTestsCompleted,
@@ -81,6 +83,11 @@ export interface GateDeps {
   fallbackLabel: string
   /** Current PR labels, read when the tests finish (a label added mid-run counts); undefined falls back to the event. */
   currentLabels?(): Promise<string[] | undefined>
+  /**
+   * For branch builds: waits for and reports baseline merges from the PRs that produced this commit, before the tests
+   * run (merge.ts).
+   */
+  mergeNotes?(): Promise<MergeNote[]>
   /** Link to this workflow run, for check summaries. */
   logUrl?: string
   sleep?(ms: number): Promise<void>
@@ -100,6 +107,8 @@ export interface GateResult {
   warning?: string
   /** What was posted, for the job summary. */
   posted: CheckResult[]
+  /** Baseline merges into this branch build's branch. */
+  mergeNotes?: MergeNote[]
 }
 
 export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateResult> {
@@ -126,7 +135,12 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
   log.info(`Server ${config.serverUrl}`)
 
   const reporter = config.checks ? deps.reporter : undefined
+  let mergeNotes: MergeNote[] | undefined
   const publish = async (result: CheckResult, externalId?: string): Promise<void> => {
+    // A failed merge into this branch explains diffs the merged PR already accepted, so it goes with the results.
+    if (result.name === VISUAL_TESTS && result.status === 'completed' && mergeNotes) {
+      result = {...result, summary: result.summary + mergeNotesMarkdown(mergeNotes)}
+    }
     posted.push(result)
     await reporter?.publish(result, externalId)
   }
@@ -154,9 +168,16 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
 
   const eyes = deps.eyes(config.apiKey)
   const keyProblem = await checkRunKey(eyes, log)
+  if (!isPullRequest(scm) && deps.mergeNotes) {
+    try {
+      mergeNotes = await deps.mergeNotes()
+    } catch (e) {
+      log.warning(`Could not check baseline merges into this branch: ${message(e)}`)
+    }
+  }
 
   const commandExitCode = await deps.runCommand(env)
-  const base = {batchId: batch.batchId, commandExitCode, posted}
+  const base = {batchId: batch.batchId, commandExitCode, posted, mergeNotes}
   if (!config.closeBatch) {
     log.info(`closeBatch: false, leaving batch ${batch.batchId} open`)
   } else if (!(await close(eyes, batch.batchId, log))) {
@@ -195,6 +216,7 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
   visual.summary += encodeState({
     v: 1,
     batchId: batch.batchId,
+    branchName: batch.branchName,
     eyesBatchId: results.eyesBatchId,
     changed,
     expectTests: config.expectations.minTests,
