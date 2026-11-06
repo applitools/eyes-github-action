@@ -139,7 +139,8 @@ export async function retryUnmergedBaselines(
       continue
     }
     const attempt = await attemptMerge(pr, config, deps)
-    logAttempt(deps.log, pr, attempt)
+    // A failure is reported once, as the caller's error annotation from the notes.
+    if (attempt.ok) logAttempt(deps.log, pr, attempt)
     if (attempt.ok) {
       report.problems.push(...(await clearAlert(deps.alerts, pr, attempt, urls.run)))
       sections.push(`✅ ${link}: ${attempt.title}. ${attempt.detail}`)
