@@ -47,7 +47,7 @@ API load per scheduled pass: 1 `pulls.list` + 1 check-run listing per open PR, a
 
 **Ship a scheduled refresh as the default, with immediate manual triggers. Pursue the Eyes webhook separately.**
 
-1. **Done:** `mode: refresh` (no tests). Without a PR number it lists open PRs. For each, it reads the state from the latest Visual tests check, re-reads Eyes, re-applies expectations, and posts only what changed (compare by `conclusion` + title, SPEC §8.2). It re-reads settled PRs too: a reviewer can change their mind in Eyes, and an Eyes read costs ~1.2 KB, so skipping them saves little.
+1. **Done, verified live 2026-11-06 on sandbox PR #9 (label trigger):** `mode: refresh` (no tests). Without a PR number it lists open PRs. For each, it reads the state from the latest Visual tests check, re-reads Eyes, re-applies expectations, and posts only what changed (compare by `conclusion` + title, SPEC §8.2). It re-reads settled PRs too: a reviewer can change their mind in Eyes, and an Eyes read costs ~1.2 KB, so skipping them saves little.
 2. Ship an example `applitools-refresh.yml` with `schedule: '7-59/10 * * * 1-5'` (off the top of the hour, weekdays) **and** `workflow_dispatch` with an optional PR number, so a designer's "I approved it" can be applied right away from the Actions tab. Document the minute numbers above so teams can choose their cron.
 3. Ask Eyes R&D for a webhook on review events (accept/reject/save) with a configurable URL, headers and body. With that, Eyes can call `POST /repos/{owner}/{repo}/dispatches` directly, without a relay, and the same `mode: refresh` handles `repository_dispatch`. Then the schedule becomes a slow safety net (e.g. hourly).
 

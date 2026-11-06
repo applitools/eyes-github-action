@@ -97,6 +97,7 @@ jobs:
 - **Labels:** adding or removing the design review label refreshes that PR right away (unless the test workflow forced design review with `designReview` or `APPLITOOLS_DESIGN_REVIEW`).
 - **Right away, by hand:** Actions → Applitools refresh → Run workflow, with the PR number.
 - **Cost:** a schedule bills at least 1 minute per run in private repos, even with nothing to update: about 1,580 minutes a month for the cron above, 1,060 at every 15 minutes. Public repos are free. See [the proposal](docs/WATCHER-PROPOSAL.md#triggers-compared) for other schedules. Each pass makes 1 GitHub call to list PRs, 2 per PR to read checks, and 1 Eyes read per PR (~1.2 KB gzipped for 10 tests).
+- **Verified live** (2026-11-06): after the changes were accepted in Eyes, a label-triggered refresh turned Visual tests from *4 visual changes to review* to *22 passed* and Design review from *Waiting for design review* to *Approved*, in the same check runs, with no test re-run. Each refresh job took seconds.
 - **Not possible with `GITHUB_TOKEN`:** a refresh button on the check (GitHub doesn't start workflows from it) and instant updates from Eyes (Eyes has no review webhook yet).
 
 ### SDK setup
