@@ -38582,7 +38582,8 @@ async function attemptMerge(pr, config, deps, started) {
             return result('CONFLICTS', `${merged.conflicts} baseline conflict${merged.conflicts === 1 ? '' : 's'}`, `The same checkpoints changed on \`${pr.baseRef}\` too. In Eyes, open **Compare & merge branches**, compare ` +
                 `\`${source}\` → \`${target}\`, resolve the conflicts, then merge.`);
         }
-        if (merged.merged) {
+        // After conflicts are resolved by hand in Eyes, it reports a merge of 0 changes: nothing was left to merge.
+        if (merged.merged && merged.changes > 0) {
             return result('MERGED', `Baselines merged into ${pr.baseRef}`, `${merged.changes} baseline change${merged.changes === 1 ? '' : 's'} from \`${source}\` now apply to \`${target}\`.`);
         }
         return result('NOTHING_TO_MERGE', 'Nothing to merge', `\`${source}\` had no baseline changes for \`${target}\`.`);

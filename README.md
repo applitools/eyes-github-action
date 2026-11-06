@@ -177,6 +177,11 @@ Until a PR's baselines are merged, `main`'s tests compare against baselines with
 3. **Every build of `main` retries the merge** before its tests run, for each merged PR into `main` that still has the label. While one still fails, the pushed commit gets a failing **Applitools / Baseline merge** check, so `main` shows a red ❌ on the repository's home page and in its commit list. The run also gets an error annotation, and the problem is listed in its job summary and Visual tests check.
 4. **Fix the cause** (resolve the conflicts in Eyes, or add the merge key). The next build of `main` merges, or confirms there's nothing left to merge, then removes the label, turns the comment into **✅ Eyes baselines from this PR are merged into `main`** with a link to that run, and posts a passing check. Re-running the failed merge job does the same.
 
+**Verified live** (2026-11-06, a sandbox PR whose green buttons conflicted with its target branch's own changes):
+- The merge job failed with "18 baseline conflicts", and the PR got the ⚠️ comment and the label.
+- The next target-branch build retried the merge and got a red **Baseline merge** check. The comment stayed one comment, unedited.
+- The conflicts were then resolved in Eyes. The next build found nothing left to merge, removed the label, turned the comment ✅, passed the check, and its tests showed no button differences.
+
 To retry without waiting for the next push, re-run the failed merge job, or the latest `main` build.
 
 Notes:

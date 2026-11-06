@@ -183,8 +183,11 @@ describe('builds of the target branch retry until the merge works', () => {
     expect((await retry({comment: true, failBranch: false})).check?.conclusion).toBe('neutral')
   })
 
-  it('clears everything once the conflicts are resolved in Eyes', async () => {
-    eyes.mergeResult = {merged: false, conflicts: 0, changes: 0}
+  it.each([
+    ['nothing to merge', {merged: false, conflicts: 0, changes: 0}],
+    ['a merge of 0 changes (what Eyes reports after conflicts are resolved there)', {merged: true, conflicts: 0, changes: 0}]
+  ])('clears everything once the conflicts are resolved in Eyes: %s', async (_, result) => {
+    eyes.mergeResult = result
     const report = await retry()
     expect(report.check).toMatchObject({conclusion: 'success', title: 'Baselines from PR #7 merged into main'})
     expect(pr.labels).toEqual([])
