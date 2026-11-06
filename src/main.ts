@@ -188,9 +188,12 @@ async function merge(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
   } catch (e) {
     core.debug(`Could not write the job summary: ${e}`)
   }
+  // setFailed is the run's error annotation.
   if (!report.ok) {
-    core.error(`${report.title}: Eyes baselines from PR #${report.pr} weren't merged. See the job summary and the Applitools / Baseline merge check on the PR.`, {title: 'Eyes baselines not merged'})
-    core.setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`)
+    core.setFailed(
+      `${report.title}: Eyes baselines from PR #${report.pr} weren't merged. See the job summary, and the comment and ` +
+        'Applitools / Baseline merge check on the PR.'
+    )
   }
 }
 

@@ -39698,9 +39698,10 @@ async function main_merge(inputs, scm) {
     catch (e) {
         core_debug(`Could not write the job summary: ${e}`);
     }
+    // setFailed is the run's error annotation.
     if (!report.ok) {
-        error(`${report.title}: Eyes baselines from PR #${report.pr} weren't merged. See the job summary and the Applitools / Baseline merge check on the PR.`, { title: 'Eyes baselines not merged' });
-        setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`);
+        setFailed(`${report.title}: Eyes baselines from PR #${report.pr} weren't merged. See the job summary, and the comment and ` +
+            'Applitools / Baseline merge check on the PR.');
     }
 }
 /** `mode: doctor`: setup checks in the job summary; fails the job if any fails. */
