@@ -10,7 +10,8 @@ import {GateResult, runGate} from './gate.js'
 import {checkServerUrl} from './security.js'
 import {doctorMarkdown, runDoctor} from './doctor.js'
 import {GitHubApi, GitHubReporter, Reporter} from './github.js'
-import {mergeNotesBeforeTests, runMerge} from './merge.js'
+import {MergeNote, mergeNotesBeforeTests, runMerge} from './merge.js'
+import {retryUnmergedBaselines} from './merge-alerts.js'
 import {ActionInputs, readInputs} from './inputs.js'
 import {describeRefresh, runRefresh} from './refresh.js'
 import {OUTCOME_LABELS, outcome, summary} from './results.js'
@@ -37,6 +38,7 @@ export async function main(): Promise<void> {
     const logUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
 
     let reporter: Reporter | undefined
+    const alertProblems: string[] = []
     const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined
     if (inputs.config.checks) {
       if (!inputs.githubToken) {
@@ -64,14 +66,7 @@ export async function main(): Promise<void> {
       fallbackLabel: `${context.workflow} #${context.runNumber}`,
       mergeNotes:
         octokit && scm.owner && scm.repo && scm.commitSha && scm.branch
-          ? () =>
-              mergeNotesBeforeTests(
-                new GitHubApi(octokit, scm.owner!, scm.repo!),
-                scm.commitSha!,
-                scm.branch!,
-                {info: m => core.info(m), warning: m => core.warning(m)},
-                ms => new Promise(r => setTimeout(r, ms))
-              )
+          ? () => mergesIntoBranch(inputs, octokit, scm, logUrl, alertProblems)
           : undefined,
       currentLabels: async () => {
         if (!octokit || !scm.owner || !scm.repo || scm.prNumber === undefined) return undefined
@@ -82,12 +77,54 @@ export async function main(): Promise<void> {
     })
 
     setOutputs(result)
-    await writeJobSummary(result)
+    await writeJobSummary(result, alertProblems)
     if (result.warning) core.warning(result.warning)
     if (result.failure) core.setFailed(result.failure)
   } catch (e) {
     core.setFailed(e instanceof Error ? e.message : String(e))
   }
+}
+
+/**
+ * A build of a branch, before its tests: wait for baseline merges from the PRs that produced this commit, then retry
+ * the ones still labeled as not merged, posting the Baseline merge check on this commit when any were waiting.
+ */
+async function mergesIntoBranch(
+  inputs: ActionInputs,
+  octokit: ReturnType<typeof getOctokit>,
+  scm: ScmInfo,
+  runUrl: string,
+  problems: string[]
+): Promise<MergeNote[]> {
+  const log = {info: (m: string) => core.info(m), warning: (m: string) => core.warning(m)}
+  const github = new GitHubApi(octokit, scm.owner!, scm.repo!)
+  const notes = await mergeNotesBeforeTests(github, scm.commitSha!, scm.branch!, log, ms => new Promise(r => setTimeout(r, ms)))
+  let retry
+  try {
+    retry = await retryUnmergedBaselines(
+      // Only a key given for merging: retrying with the run key would only report "Eyes refused".
+      {...inputs.merge, mergeApiKey: inputs.keys.mergeApiKey},
+      {github, alerts: github, eyes: key => new EyesClient(inputs.merge.serverUrl, key, inputs.config.apiKeyInQuery), log, repo: `${scm.owner}/${scm.repo}`},
+      scm.branch!,
+      inputs.alerts,
+      {run: runUrl, pullRequest: n => `${context.serverUrl}/${scm.owner}/${scm.repo}/pull/${n}`}
+    )
+  } catch (e) {
+    core.warning(`Couldn't look for merged PRs whose baselines still need merging: ${e instanceof Error ? e.message : e}`)
+    return notes
+  }
+  if (retry.check && inputs.config.checks) {
+    await new GitHubReporter(octokit, scm.owner!, scm.repo!, scm.commitSha!, inputs.githubReporting).publish(retry.check)
+  }
+  for (const n of retry.notes) {
+    if (n.ok) core.info(n.line)
+    else if (inputs.alerts.failBranch) core.error(n.line, {title: 'Eyes baselines not merged'})
+    else core.warning(n.line)
+  }
+  for (const p of retry.problems) core.warning(p)
+  problems.push(...retry.problems)
+  const retried = new Set(retry.notes.map(n => n.pr))
+  return [...notes.filter(n => !retried.has(n.pr)), ...retry.notes]
 }
 
 /** `mode: refresh`: the event's PR (or `pullRequest`), otherwise every open PR. No tests run. */
@@ -128,20 +165,33 @@ async function merge(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
         inputs.config.checks ? new GitHubReporter(octokit, scm.owner!, scm.repo!, sha, 'CHECKS') : undefined,
       eyes: key => new EyesClient(inputs.merge.serverUrl, key, inputs.config.apiKeyInQuery),
       log: {info: m => core.info(m), warning: m => core.warning(m)},
-      repo: `${scm.owner}/${scm.repo}`
+      repo: `${scm.owner}/${scm.repo}`,
+      alerts: {
+        github: new GitHubApi(octokit, scm.owner, scm.repo),
+        options: inputs.alerts,
+        runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+      }
     },
     scm.prNumber
   )
+  for (const p of report.alertProblems ?? []) core.warning(p)
   if (report.outcome) core.setOutput('baselineMerge', report.outcome)
-  const md = report.skipped
+  let md = report.skipped
     ? report.skipped
     : `### ${report.ok ? '✅' : '❌'} ${report.title}\n\n${report.summary}`
+  if (!report.ok && inputs.alerts.comment && !report.alertProblems?.length) {
+    md += `\n\nPR #${report.pr} is labeled \`eyes-baselines-not-merged\` and has a comment explaining this. Builds of its target branch retry the merge until it works.`
+  }
+  if (report.alertProblems?.length) md += `\n\n${report.alertProblems.map(p => `- ⚠️ ${p}`).join('\n')}`
   try {
     await core.summary.addRaw(`## Applitools baseline merge\n\n${md}\n`).write()
   } catch (e) {
     core.debug(`Could not write the job summary: ${e}`)
   }
-  if (!report.ok) core.setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`)
+  if (!report.ok) {
+    core.error(`${report.title}: Eyes baselines from PR #${report.pr} weren't merged. See the job summary and the Applitools / Baseline merge check on the PR.`, {title: 'Eyes baselines not merged'})
+    core.setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`)
+  }
 }
 
 /** `mode: doctor`: setup checks in the job summary; fails the job if any fails. */
@@ -218,7 +268,7 @@ function setOutputs(result: GateResult): void {
   if (result.design) core.setOutput('designReview', result.design.state)
 }
 
-async function writeJobSummary(result: GateResult): Promise<void> {
+async function writeJobSummary(result: GateResult, alertProblems: string[] = []): Promise<void> {
   // Markdown headings: an HTML heading swallows the markdown that follows it unless a blank line intervenes.
   let md = '## Applitools\n\n'
   if (result.results) {
@@ -230,6 +280,7 @@ async function writeJobSummary(result: GateResult): Promise<void> {
   if (result.mergeNotes?.length) {
     md += `### Baseline merges into this branch\n\n${result.mergeNotes.map(n => `- ${n.ok ? '' : '⚠️ '}${n.line}`).join('\n')}\n`
   }
+  if (alertProblems.length) md += `\n${alertProblems.map(p => `- ⚠️ ${p}`).join('\n')}\n`
   try {
     await core.summary.addRaw(md).write()
   } catch (e) {

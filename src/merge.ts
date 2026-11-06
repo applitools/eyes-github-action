@@ -1,13 +1,14 @@
 /**
  * Baseline merge (SPEC §10.7, §11): when a PR merges, merge its Eyes baseline branch into the target branch's, so the
  * changes reviewers accepted don't show up again as diffs there. Every outcome, including skips, is posted as
- * "Applitools / Baseline merge" on the PR's last commit and fails the job when something needs fixing; the next build of
- * the target branch repeats it before its tests run.
+ * "Applitools / Baseline merge" on the PR's last commit and fails the job when something needs fixing. A failure also
+ * comments on and labels the PR (merge-alerts.ts), and builds of the target branch retry it until it works.
  */
 import {BASELINE_MERGE, CheckResult, VISUAL_TESTS} from './checks.js'
 import {EyesClient, EyesHttpError} from './eyes.js'
 import {Logger} from './gate.js'
 import {Reporter} from './github.js'
+import {AlertGitHub, AlertOptions, clearAlert, raiseAlert} from './merge-alerts.js'
 import {PostedCheck} from './refresh.js'
 import {decodeState} from './state.js'
 
@@ -30,6 +31,7 @@ export interface MergedPullRequest {
   baseRef: string
   /** From a fork: its Eyes branch is `owner/repo/pr-N` (SPEC §3.2). */
   fork?: boolean
+  labels?: string[]
 }
 
 export interface MergeGitHub {
@@ -50,6 +52,8 @@ export interface MergeDeps {
   repo: string
   sleep?(ms: number): Promise<void>
   pollMs?: number
+  /** Comment on and label the PR when the merge fails; clear them when it works. */
+  alerts?: {github: AlertGitHub; options: AlertOptions; runUrl: string}
 }
 
 export interface MergeReport {
@@ -60,6 +64,19 @@ export interface MergeReport {
   ok: boolean
   title?: string
   summary?: string
+  /** Comments or labels that couldn't be written (usually a missing permission). */
+  alertProblems?: string[]
+}
+
+/** One merge of a PR's baselines, before anything is posted. */
+export interface MergeAttempt {
+  outcome: MergeOutcome
+  ok: boolean
+  title: string
+  /** Markdown: what happened and, on failure, what to do. */
+  detail: string
+  source: string
+  target: string
 }
 
 const OK: MergeOutcome[] = ['MERGED', 'NOTHING_TO_MERGE']
@@ -73,6 +90,43 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
     return {pr: pr.number, skipped, ok: true}
   }
 
+  const reporter = deps.reporter(pr.headSha)
+  const attempt = await attemptMerge(pr, config, deps, async (source, target) => {
+    await reporter?.publish({
+      name: BASELINE_MERGE,
+      status: 'in_progress',
+      title: `Merging baselines into ${pr.baseRef}`,
+      summary: `Eyes baseline branch \`${source}\` → \`${target}\`.`
+    })
+  })
+  const retry =
+    attempt.outcome === 'CONFLICTS'
+      ? "\n\nOnce they're resolved, re-run this job to confirm."
+      : `\n\nOnce that's fixed, re-run this job to retry, or merge by hand in Eyes under **Compare & merge branches** ` +
+        `(\`${attempt.source}\` → \`${attempt.target}\`).`
+  const summary = attempt.ok ? attempt.detail : attempt.detail + retry
+  await reporter?.publish(mergeCheck(attempt.ok, attempt.title, summary))
+  logAttempt(log, pr, attempt)
+
+  let alertProblems: string[] | undefined
+  if (deps.alerts) {
+    const {github, options, runUrl} = deps.alerts
+    if (!attempt.ok && options.comment) alertProblems = await raiseAlert(github, pr, attempt, options)
+    else if (attempt.ok) alertProblems = await clearAlert(github, pr, attempt, runUrl)
+  }
+  return {pr: pr.number, outcome: attempt.outcome, ok: attempt.ok, title: attempt.title, summary, alertProblems}
+}
+
+/**
+ * Merges a merged PR's Eyes baseline branch into its target's. Never throws for Eyes problems: every way it can go
+ * wrong is an outcome. `started` is called once Eyes is about to be asked.
+ */
+export async function attemptMerge(
+  pr: MergedPullRequest,
+  config: MergeConfig,
+  deps: Pick<MergeDeps, 'github' | 'eyes' | 'log' | 'repo' | 'sleep' | 'pollMs'>,
+  started?: (source: string, target: string) => Promise<void>
+): Promise<MergeAttempt> {
   // The branch the tests ran on, as the gated run recorded it; derived from the PR when no run recorded one.
   const state = (await deps.github.checks(pr.headSha, [VISUAL_TESTS]))
     .sort((a, b) => b.id - a.id)
@@ -80,29 +134,18 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
     .find(s => s !== undefined)
   const source = state?.branchName ?? `${deps.repo}/${pr.fork ? `pr-${pr.number}` : pr.headRef}`
   const target = `${deps.repo}/${pr.baseRef}`
-  const how = `Eyes baseline branch \`${source}\` → \`${target}\``
-  const fixThenRetry =
-    `\n\nOnce that's fixed, re-run this job to retry, or merge by hand in Eyes under **Compare & merge branches** ` +
-    `(\`${source}\` → \`${target}\`).`
-
-  const reporter = deps.reporter(pr.headSha)
-  await reporter?.publish({
-    name: BASELINE_MERGE,
-    status: 'in_progress',
-    title: `Merging baselines into ${pr.baseRef}`,
-    summary: `${how}.`
+  const result = (outcome: MergeOutcome, title: string, detail: string): MergeAttempt => ({
+    outcome,
+    ok: OK.includes(outcome),
+    title,
+    detail,
+    source,
+    target
   })
-  const report = async (outcome: MergeOutcome, title: string, summary: string): Promise<MergeReport> => {
-    const ok = OK.includes(outcome)
-    const full = ok ? summary : summary + (outcome === 'CONFLICTS' ? "\n\nOnce they're resolved, re-run this job to confirm." : fixThenRetry)
-    await reporter?.publish(mergeCheck(ok, title, full))
-    if (ok) log.info(`Baseline merge from PR #${pr.number}: ${title}. ${plain(summary)}`)
-    else log.warning(`Baseline merge from PR #${pr.number}: ${title}. ${plain(full)}`)
-    return {pr: pr.number, outcome, ok, title, summary: full}
-  }
 
+  await started?.(source, target)
   if (!config.mergeApiKey) {
-    return report(
+    return result(
       'NO_KEY',
       'Baseline merge skipped',
       `No Eyes key to merge \`${source}\` into \`${target}\`. Pass an Eyes merge key as ` +
@@ -114,11 +157,11 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
   try {
     const task = await eyes.startBranchMerge(source, target)
-    log.info(`Merging ${source} into ${target} (Eyes task ${task})`)
+    deps.log.info(`Merging ${source} into ${target} (Eyes task ${task})`)
     const deadline = Date.now() + config.mergeTimeout * 1000
     while (!(await eyes.isTaskDone(task))) {
       if (Date.now() > deadline) {
-        return report(
+        return result(
           'TIMED_OUT',
           'Baseline merge timed out',
           `Eyes was still merging \`${source}\` into \`${target}\` after ${config.mergeTimeout}s. Check the branch in Eyes: ` +
@@ -127,26 +170,26 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
       }
       await sleep(deps.pollMs ?? 5000)
     }
-    const result = await eyes.taskResult(task)
-    if (result.conflicts > 0) {
-      return report(
+    const merged = await eyes.taskResult(task)
+    if (merged.conflicts > 0) {
+      return result(
         'CONFLICTS',
-        `${result.conflicts} baseline conflict${result.conflicts === 1 ? '' : 's'}`,
-        `The same checkpoints changed on \`${pr.baseRef}\` too. Resolve them in Eyes under **Compare & merge branches** ` +
-          `(\`${source}\` → \`${target}\`).`
+        `${merged.conflicts} baseline conflict${merged.conflicts === 1 ? '' : 's'}`,
+        `The same checkpoints changed on \`${pr.baseRef}\` too. In Eyes, open **Compare & merge branches**, compare ` +
+          `\`${source}\` → \`${target}\`, resolve the conflicts, then merge.`
       )
     }
-    if (result.merged) {
-      return report(
+    if (merged.merged) {
+      return result(
         'MERGED',
         `Baselines merged into ${pr.baseRef}`,
-        `${result.changes} baseline change${result.changes === 1 ? '' : 's'} from \`${source}\` now apply to \`${target}\`.`
+        `${merged.changes} baseline change${merged.changes === 1 ? '' : 's'} from \`${source}\` now apply to \`${target}\`.`
       )
     }
-    return report('NOTHING_TO_MERGE', 'Nothing to merge', `\`${source}\` had no baseline changes for \`${target}\`.`)
+    return result('NOTHING_TO_MERGE', 'Nothing to merge', `\`${source}\` had no baseline changes for \`${target}\`.`)
   } catch (e) {
     if (e instanceof EyesHttpError && e.unauthorized) {
-      return report(
+      return result(
         'REFUSED',
         'Eyes refused the baseline merge',
         `HTTP ${e.status}: only Eyes **merge** keys (created for a team and a user) can merge baselines. Add one as the ` +
@@ -159,11 +202,17 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
         ". No visual test run with Eyes results was found on this PR's last commit; if its tests never ran, there's " +
         'nothing to merge.'
     }
-    return report('FAILED', 'Baseline merge failed', `${detail}.`.replace(/\.\.$/, '.'))
+    return result('FAILED', 'Baseline merge failed', `${detail}.`.replace(/\.\.$/, '.'))
   }
 }
 
-function mergeCheck(ok: boolean, title: string, summary: string): CheckResult {
+export function logAttempt(log: Logger, pr: MergedPullRequest, attempt: MergeAttempt): void {
+  const line = `Baseline merge from PR #${pr.number}: ${attempt.title}. ${plain(attempt.detail)}`
+  if (attempt.ok) log.info(line)
+  else log.warning(line)
+}
+
+export function mergeCheck(ok: boolean, title: string, summary: string): CheckResult {
   return {name: BASELINE_MERGE, status: 'completed', conclusion: ok ? 'success' : 'failure', title, summary}
 }
 
@@ -238,6 +287,6 @@ export function mergeNotesMarkdown(notes: MergeNote[]): string {
 }
 
 /** Check summaries are Markdown; logs aren't. */
-function plain(markdown: string): string {
+export function plain(markdown: string): string {
   return markdown.replace(/\*\*|`/g, '').replace(/\s*\n+\s*/g, ' ').trim()
 }

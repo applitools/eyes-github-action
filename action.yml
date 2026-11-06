@@ -25,12 +25,20 @@ inputs:
     description: 'Eyes read key (reads results and teams). Run keys usually can''t read results. Defaults to APPLITOOLS_READ_KEY, then the run key.'
     required: false
   mergeApiKey:
-    description: 'Eyes merge key, for `mode: merge`. Defaults to the APPLITOOLS_MERGE_KEY environment variable, then the run key (which Eyes usually refuses for merges).'
+    description: 'Eyes merge key. For `mode: merge`, and for branch builds, which retry merges that failed. Defaults to the APPLITOOLS_MERGE_KEY environment variable; `mode: merge` then falls back to the run key (which Eyes usually refuses for merges).'
     required: false
   mergeTimeout:
     description: 'Seconds to wait for Eyes to merge baselines.'
     required: false
     default: '600'
+  baselineMergeAlerts:
+    description: 'When a merged PR''s Eyes baselines can''t be merged: comment on the PR and label it `eyes-baselines-not-merged` (needs `pull-requests: write`). The label is how builds of the target branch know to retry. false: report only in checks and logs.'
+    required: false
+    default: 'true'
+  failBranchOnUnmergedBaselines:
+    description: 'While a labeled PR''s baselines are still unmerged, fail the Applitools / Baseline merge check on every build of its target branch. false: post it as neutral instead.'
+    required: false
+    default: 'true'
   allowHttp:
     description: 'Allow plain http to an Eyes server other than this machine (the keys would travel unencrypted).'
     required: false

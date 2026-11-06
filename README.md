@@ -33,12 +33,12 @@ name: Visual tests
 on:
   pull_request:
   push:
-    branches: [main]     # keeps main's baselines current, and reports baseline merges into it
+    branches: [main]     # keeps main's baselines current, and retries baseline merges into it
 
 permissions:
   contents: read
   checks: write          # post the checks
-  pull-requests: read    # read labels when the tests finish
+  pull-requests: write   # read labels; on main, clear a PR's alert once its baselines merge
 
 jobs:
   visual:
@@ -52,6 +52,7 @@ jobs:
         with:
           apiKey: ${{ secrets.APPLITOOLS_API_KEY }}
           readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}
+          mergeApiKey: ${{ secrets.APPLITOOLS_MERGE_KEY }}   # main builds retry baseline merges that failed
           run: npx playwright test
 ```
 
@@ -125,7 +126,7 @@ on:
 
 permissions:
   checks: write
-  pull-requests: read
+  pull-requests: write     # comment on and label the PR when its baselines can't be merged
 
 # One merge at a time into each branch.
 concurrency: applitools-merge-${{ github.event.pull_request.base.ref }}
@@ -141,22 +142,49 @@ jobs:
           mergeApiKey: ${{ secrets.APPLITOOLS_MERGE_KEY }}
 ```
 
-Every outcome shows on the PR as **Applitools / Baseline merge** (posted on its last commit, so don't make it required). Anything that needs fixing also fails the job, so it shows as a failed run and GitHub notifies whoever merged.
+Every outcome shows on the PR as **Applitools / Baseline merge** (posted on its last commit, so don't make it required).
 
 | Check | Means | What to do |
 | --- | --- | --- |
 | ✅ Baselines merged into main | N baseline changes now apply to `main` | Nothing |
 | ✅ Nothing to merge | The PR's branch had no baseline changes | Nothing |
-| ❌ N baseline conflicts | The same checkpoints changed on `main` too | Resolve them in Eyes under **Compare & merge branches**, then re-run the job |
-| ❌ Eyes refused the baseline merge | The key isn't a merge key | Add a merge key as `APPLITOOLS_MERGE_KEY`, then re-run the job |
+| ❌ N baseline conflicts | The same checkpoints changed on `main` too | In Eyes, open **Compare & merge branches**, compare the two branches, resolve the conflicts, then merge |
+| ❌ Eyes refused the baseline merge | The key isn't a merge key | Add a merge key as `APPLITOOLS_MERGE_KEY` |
 | ❌ Baseline merge skipped | No key at all | Same |
 | ❌ Baseline merge timed out | Eyes was still merging after `mergeTimeout` (600 s) | Check the branch in Eyes; the merge may still finish there |
-| ❌ Baseline merge failed | Anything else, e.g. Eyes has no such branch | Read the check; re-run the job or merge by hand in Eyes |
+| ❌ Baseline merge failed | Anything else, e.g. Eyes has no such branch | Read the check; merge by hand in Eyes if needed |
 
 - **It reads the PR from GitHub**, not from the event, and merges from the Eyes branch the test run recorded. Fork PRs get their own branch (`owner/repo/pr-N`), so a fork's `main` can't touch yours.
-- **The next `main` build waits** up to 60 s for a merge that's still running, then says in its log how each merge into `main` went. A failed one is a warning, also shown in its Visual tests check: until the baselines are merged, that build may flag changes the PR already accepted.
-- **Retry** is **Re-run jobs** on the failed merge run, once the key or conflicts are fixed. Or merge by hand in Eyes under **Compare & merge branches**.
+- **The next `main` build waits** up to 60 s for a merge that's still running before its tests start.
 - **Cost:** one job per merged PR, usually under a minute: one GitHub read, one Eyes merge request, a status poll every 5 s.
+
+### When a merge fails
+
+Until a PR's baselines are merged, `main`'s tests compare against baselines without its accepted changes, so they flag them again. The action makes that hard to miss and keeps saying so until it's fixed:
+
+1. **The merge job fails**, with an error annotation and the reason in its job summary. GitHub emails whoever merged the PR.
+2. **The PR gets a comment** (which notifies its author and reviewers) and the label **`eyes-baselines-not-merged`**. The comment says what went wrong and what to do, for example:
+
+   > ### ⚠️ Eyes baselines from this PR weren't merged into `main`
+   >
+   > **2 baseline conflicts**
+   >
+   > The same checkpoints changed on `main` too. In Eyes, open **Compare & merge branches**, compare `acme/web/feature` → `acme/web/main`, resolve the conflicts, then merge.
+   >
+   > Until then, builds of `main` fail the **Applitools / Baseline merge** check, and their tests may flag the changes this PR accepted. The next run on `main` after it's fixed confirms the merge and updates this comment.
+
+   There's only ever one such comment per PR; it's edited when the reason changes, never repeated.
+3. **Every build of `main` retries the merge** before its tests run, for each merged PR into `main` that still has the label. While one still fails, the pushed commit gets a failing **Applitools / Baseline merge** check, so `main` shows a red ❌ on the repository's home page and in its commit list. The run also gets an error annotation, and the problem is listed in its job summary and Visual tests check.
+4. **Fix the cause** (resolve the conflicts in Eyes, or add the merge key). The next build of `main` merges, or confirms there's nothing left to merge, then removes the label, turns the comment into **✅ Eyes baselines from this PR are merged into `main`** with a link to that run, and posts a passing check. Re-running the failed merge job does the same.
+
+To retry without waiting for the next push, re-run the failed merge job, or the latest `main` build.
+
+Notes:
+- **The label is the to-do list.** The action has nowhere else to keep state. Removing it by hand stops the retries; adding it makes the next `main` build retry that PR.
+- **Retries need `mergeApiKey`** in the test workflow. Without it, `main` builds still fail the check and say why, but don't retry (a run key would only replace the real reason with "Eyes refused").
+- **Permissions:** commenting and labeling need `pull-requests: write` in the merge workflow, and removing the label needs it in the test workflow. Without it, the run warns in its log and job summary, and the checks still fail. Without the label, though, `main` builds can't know to retry.
+- **Report only:** `baselineMergeAlerts: false` skips the comment and label; `failBranchOnUnmergedBaselines: false` posts `main`'s Baseline merge check as neutral instead of failing it.
+- `main` builds look through the 300 most recently updated closed PRs into the branch. Adding the label updates a PR, so that's plenty unless hundreds of PRs merge while one waits.
 
 ## Checking the setup
 
@@ -215,8 +243,10 @@ Teams are read from Eyes with the read key, so you manage designers in Eyes, whe
 | `workingDirectory` | | Where to run it |
 | `apiKey` | `$APPLITOOLS_API_KEY` | Eyes run key |
 | `readApiKey` | `$APPLITOOLS_READ_KEY`, else the run key | Eyes read key |
-| `mergeApiKey` | `$APPLITOOLS_MERGE_KEY`, else the run key | Eyes merge key, for `mode: merge` |
+| `mergeApiKey` | `$APPLITOOLS_MERGE_KEY` (`mode: merge` then falls back to the run key) | Eyes merge key: for `mode: merge`, and for branch builds to [retry failed merges](#when-a-merge-fails) |
 | `mergeTimeout` | `600` | Seconds to wait for Eyes to merge |
+| `baselineMergeAlerts` | `true` | When a merge fails, comment on the PR and label it `eyes-baselines-not-merged` |
+| `failBranchOnUnmergedBaselines` | `true` | Fail the Baseline merge check on target-branch builds while a labeled PR's baselines aren't merged (`false`: neutral) |
 | `serverUrl` | `https://eyes.applitools.com` | Dedicated cloud or on-prem |
 | `batchId`, `batchName`, `branchName`, `parentBranchName` | derived | Overrides; `${VAR}` is expanded |
 | `closeBatch` | `true` | Close the batch after the command |

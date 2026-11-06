@@ -4,6 +4,7 @@ import {parseDesigners} from './designers.js'
 import {ChangesPolicy, GateConfig, parseBool} from './gate.js'
 import {Reporting} from './github.js'
 import {MergeConfig} from './merge.js'
+import {AlertOptions} from './merge-alerts.js'
 
 export type Mode = 'RUN' | 'REFRESH' | 'MERGE' | 'DOCTOR'
 
@@ -16,6 +17,8 @@ export interface ActionInputs {
   githubReporting: Reporting
   config: GateConfig
   merge: MergeConfig
+  /** What a failed baseline merge does besides failing the merge job. */
+  alerts: AlertOptions
   /** Keys as given, for the setup check. */
   keys: {apiKey?: string; readApiKey?: string; mergeApiKey?: string}
   /** Plain http to a server other than this machine. */
@@ -93,7 +96,11 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
     allowHttp: bool('allowHttp', false),
     allowForkPullRequests: bool('allowForkPullRequests', false),
     // Merge key, then the run key (SPEC §11).
-    merge: {serverUrl, mergeApiKey: mergeApiKey || apiKey || undefined, mergeTimeout: positiveInt('mergeTimeout') ?? 600}
+    merge: {serverUrl, mergeApiKey: mergeApiKey || apiKey || undefined, mergeTimeout: positiveInt('mergeTimeout') ?? 600},
+    alerts: {
+      comment: bool('baselineMergeAlerts', true),
+      failBranch: bool('failBranchOnUnmergedBaselines', true)
+    }
   }
 }
 

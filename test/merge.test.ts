@@ -98,7 +98,7 @@ describe('runMerge', () => {
     eyes.mergeResult = {merged: false, conflicts: 3, changes: 0}
     expect(await runMerge(config(), deps(), 7)).toMatchObject({outcome: 'CONFLICTS', ok: false})
     expect(last()).toMatchObject({conclusion: 'failure', title: '3 baseline conflicts'})
-    expect(last().summary).toContain('Resolve them in Eyes under **Compare & merge branches**')
+    expect(last().summary).toContain('In Eyes, open **Compare & merge branches**, compare `acme/web/feature` → `acme/web/main`, resolve the conflicts, then merge.')
     expect(last().summary).toContain("Once they're resolved, re-run this job to confirm.")
     expect(last().summary.match(/Compare & merge branches/g)).toHaveLength(1)
     expect(logs.some(l => l.startsWith('WARN Baseline merge from PR #7: 3 baseline conflicts.'))).toBe(true)

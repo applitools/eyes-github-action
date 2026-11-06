@@ -6,6 +6,7 @@
 import * as core from '@actions/core'
 import {getOctokit} from '@actions/github'
 import {CheckResult, toStatus} from './checks.js'
+import {AlertGitHub, IssueComment} from './merge-alerts.js'
 import {MergeGitHub, MergedPullRequest} from './merge.js'
 import {PostedCheck, PullRequest, RefreshGitHub} from './refresh.js'
 
@@ -76,7 +77,7 @@ export class GitHubReporter implements Reporter {
  * Reads PRs and check runs and updates checks, for refreshes and baseline merges. Unlike publishing, errors are thrown
  * to the caller.
  */
-export class GitHubApi implements RefreshGitHub, MergeGitHub {
+export class GitHubApi implements RefreshGitHub, MergeGitHub, AlertGitHub {
   constructor(
     private readonly octokit: Octokit,
     private readonly owner: string,
@@ -137,6 +138,60 @@ export class GitHubApi implements RefreshGitHub, MergeGitHub {
     }))
   }
 
+  async comments(pr: number): Promise<IssueComment[]> {
+    const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: pr,
+      per_page: 100
+    })
+    return comments.map(c => ({id: c.id, body: c.body ?? ''}))
+  }
+
+  async createComment(pr: number, body: string): Promise<void> {
+    await this.octokit.rest.issues.createComment({owner: this.owner, repo: this.repo, issue_number: pr, body})
+  }
+
+  async updateComment(id: number, body: string): Promise<void> {
+    await this.octokit.rest.issues.updateComment({owner: this.owner, repo: this.repo, comment_id: id, body})
+  }
+
+  async addLabel(pr: number, label: string): Promise<void> {
+    await this.octokit.rest.issues.addLabels({owner: this.owner, repo: this.repo, issue_number: pr, labels: [label]})
+  }
+
+  async removeLabel(pr: number, label: string): Promise<void> {
+    try {
+      await this.octokit.rest.issues.removeLabel({owner: this.owner, repo: this.repo, issue_number: pr, name: label})
+    } catch (e) {
+      // Already gone.
+      if ((e as {status?: number}).status !== 404) throw e
+    }
+  }
+
+  /**
+   * The most recently updated closed PRs into `base` (labeling a PR updates it, so labeled ones sort near the top).
+   * Listing PRs needs only `pull-requests: read`, and unlike search it has no indexing delay.
+   */
+  async labeledMergedPullRequests(base: string, label: string): Promise<MergedPullRequest[]> {
+    const found: MergedPullRequest[] = []
+    for (let page = 1; page <= 3; page++) {
+      const {data} = await this.octokit.rest.pulls.list({
+        owner: this.owner,
+        repo: this.repo,
+        state: 'closed',
+        base,
+        sort: 'updated',
+        direction: 'desc',
+        per_page: 100,
+        page
+      })
+      found.push(...data.filter(pr => pr.merged_at && pr.labels.some(l => l.name === label)).map(toMerged))
+      if (data.length < 100) break
+    }
+    return found.sort((a, b) => a.number - b.number)
+  }
+
   async update(id: number, result: CheckResult): Promise<void> {
     await this.octokit.rest.checks.update({
       owner: this.owner,
@@ -170,6 +225,7 @@ function toMerged(pr: {
   number: number
   title: string
   merged_at: string | null
+  labels?: {name?: string}[]
   head: {sha: string; ref: string; repo: {full_name: string} | null}
   base: {ref: string; repo: {full_name: string}}
 }): MergedPullRequest {
@@ -180,7 +236,8 @@ function toMerged(pr: {
     headSha: pr.head.sha,
     headRef: pr.head.ref,
     baseRef: pr.base.ref,
-    fork: pr.head.repo?.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase()
+    fork: pr.head.repo?.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase(),
+    labels: (pr.labels ?? []).flatMap(l => (l.name ? [l.name] : []))
   }
 }
 
