@@ -49,7 +49,9 @@ export function evaluate(
   results: BatchResults,
   changedTestIds: string[],
   approvers: Map<string, Set<string>>,
-  designers: Designers
+  designers: Designers,
+  /** Leave reviewers' and designers' emails out: they're public on public repositories. */
+  hideReviewers = false
 ): Verdict {
   if (!required) {
     return {
@@ -110,15 +112,16 @@ export function evaluate(
     return {
       state: 'WAITING',
       title: 'Waiting for a designer',
-      detail:
-        `Changes were accepted${others.length === 0 ? '' : ` by ${others.join(', ')}`}` +
-        `, but a designer (${describe(designers)}) must approve them.` +
-        (designers.problem ? ` Note: ${designers.problem}.` : '')
+      detail: hideReviewers
+        ? 'Changes were accepted, but a designer must approve them.'
+        : `Changes were accepted${others.length === 0 ? '' : ` by ${others.join(', ')}`}` +
+          `, but a designer (${describe(designers)}) must approve them.` +
+          (designers.problem ? ` Note: ${designers.problem}.` : '')
     }
   }
   return {
     state: 'APPROVED',
-    title: `Approved by ${[...approvedBy].sort().join(', ')}`,
+    title: hideReviewers ? 'Approved by a designer' : `Approved by ${[...approvedBy].sort().join(', ')}`,
     detail: 'Every visual change was accepted by a designer.'
   }
 }

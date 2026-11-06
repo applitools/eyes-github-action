@@ -28,6 +28,8 @@ export interface MergedPullRequest {
   headSha: string
   headRef: string
   baseRef: string
+  /** From a fork: its Eyes branch is `owner/repo/pr-N` (SPEC §3.2). */
+  fork?: boolean
 }
 
 export interface MergeGitHub {
@@ -76,7 +78,7 @@ export async function runMerge(config: MergeConfig, deps: MergeDeps, prNumber: n
     .sort((a, b) => b.id - a.id)
     .map(c => decodeState(c.summary))
     .find(s => s !== undefined)
-  const source = state?.branchName ?? `${deps.repo}/${pr.headRef}`
+  const source = state?.branchName ?? `${deps.repo}/${pr.fork ? `pr-${pr.number}` : pr.headRef}`
   const target = `${deps.repo}/${pr.baseRef}`
   const how = `Eyes baseline branch \`${source}\` → \`${target}\``
   const fixThenRetry =

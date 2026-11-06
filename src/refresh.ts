@@ -13,7 +13,14 @@ import {GateState, decodeState, encodeState} from './state.js'
 
 export type RefreshConfig = Pick<
   GateConfig,
-  'apiKey' | 'readApiKey' | 'designReview' | 'designReviewLabel' | 'designers' | 'designReviewByDefault' | 'designReviewCheck'
+  | 'apiKey'
+  | 'readApiKey'
+  | 'designReview'
+  | 'designReviewLabel'
+  | 'designers'
+  | 'designReviewByDefault'
+  | 'designReviewCheck'
+  | 'hideReviewers'
 >
 
 export interface PullRequest {

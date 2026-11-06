@@ -73,6 +73,13 @@ describe('runMerge', () => {
     expect(eyes.merges).toEqual(['acme/web/custom → acme/web/main'])
   })
 
+  it("merges a fork PR's own branch", async () => {
+    eyes.branches.add('acme/web/pr-7')
+    pr.fork = true
+    await runMerge(config(), deps(), 7)
+    expect(eyes.merges).toEqual(['acme/web/pr-7 → acme/web/main'])
+  })
+
   it('does nothing for a PR closed without merging', async () => {
     pr.merged = false
     const report = await runMerge(config(), deps(), 7)

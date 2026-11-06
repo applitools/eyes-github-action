@@ -4,6 +4,7 @@
  */
 import {Verdict} from './design-review.js'
 import {BatchResults, outcome, summary} from './results.js'
+import {markdownText} from './security.js'
 
 export const VISUAL_TESTS = 'Applitools / Visual tests'
 export const DESIGN_REVIEW = 'Applitools / Design review'
@@ -155,7 +156,7 @@ function statusBadge(status: string): string {
   }
 }
 
-/** Keeps names from breaking the markdown table. */
+/** Names come from test code: plain text only, and they mustn't break the table. */
 function escape(text: string): string {
-  return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+  return markdownText(text)
 }

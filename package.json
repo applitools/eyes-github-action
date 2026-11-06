@@ -1,5 +1,5 @@
 {
-  "name": "applitools-visual-review-action",
+  "name": "eyes-github-action",
   "version": "0.1.0",
   "private": true,
   "description": "Applitools Eyes visual review gate for pull requests: Visual tests and Design review checks.",

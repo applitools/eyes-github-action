@@ -4,6 +4,7 @@
  */
 import {BatchResults, parseResults} from './results.js'
 import {Team} from './designers.js'
+import {MAX_RESPONSE_BYTES} from './security.js'
 
 const TIMEOUT_MS = 30_000
 const API_KEY_HEADER = 'X-Eyes-Api-Key'
@@ -30,6 +31,9 @@ export interface KeyInfo {
   permissions: string[]
 }
 
+/** What a key may do, judged from harmless requests. */
+export type KeyCheck = 'INVALID' | 'NOT_ALLOWED' | 'ALLOWED'
+
 export interface MergeResult {
   merged: boolean
   conflicts: number
@@ -42,7 +46,9 @@ export class EyesClient {
 
   constructor(
     serverUrl: string,
-    private readonly apiKey: string
+    private readonly apiKey: string,
+    /** Retry closing with the key in the query string, for old on-premises servers (opt-in: URLs get logged). */
+    private readonly apiKeyInQuery = false
   ) {
     this.serverUrl = serverUrl.replace(/\/+$/, '')
   }
@@ -56,7 +62,7 @@ export class EyesClient {
   async closeBatch(batchId: string): Promise<boolean> {
     const path = `/api/sessions/batches/${enc(batchId)}/close/bypointerid`
     let response = await this.send('DELETE', path)
-    if (response.status === 401) {
+    if (response.status === 401 && this.apiKeyInQuery) {
       // Older or on-prem servers may only accept the key as a query parameter on this endpoint.
       response = await this.send('DELETE', `${path}?apiKey=${enc(this.apiKey)}`, false)
     }
@@ -138,6 +144,27 @@ export class EyesClient {
     return users
   }
 
+  /** Reads a batch that can't exist (SPEC §10.8): 404 means the key may read results, 403 not, 401 it's invalid. */
+  async checkRead(): Promise<KeyCheck> {
+    const response = await this.send('GET', '/api/sessions/batches/applitools-gate-setup-check/bypointerid')
+    await response.body?.cancel()
+    return response.status === 401 ? 'INVALID' : response.status === 403 ? 'NOT_ALLOWED' : 'ALLOWED'
+  }
+
+  /**
+   * Requests a real merge of two branches that can't exist, so nothing changes (SPEC §10.8): 202 or 404 means the key
+   * may merge. A check-only merge isn't a probe: read keys may check.
+   */
+  async checkMerge(): Promise<KeyCheck> {
+    const query =
+      `SourceBranch=${enc('applitools-gate-setup-check/nonexistent/source')}` +
+      `&TargetBranch=${enc('applitools-gate-setup-check/nonexistent/target')}&OnlyCheck=false`
+    const response = await this.send('POST', `/api/baselines/branches/merge?${query}`)
+    await response.body?.cancel()
+    if (response.status === 401) return 'INVALID'
+    return response.status === 202 || response.status === 404 ? 'ALLOWED' : 'NOT_ALLOWED'
+  }
+
   /**
    * Starts merging one baseline branch into another, both `owner/repo/branch` (SPEC §10.7). Needs a merge key.
    *
@@ -195,12 +222,15 @@ export class EyesClient {
     }
   }
 
+  /** Never echoes the response: the server may not be Eyes, and errors reach logs and PR checks. */
   private async json(response: Response): Promise<any> {
-    const text = await response.text()
+    const text = await readCapped(response)
     try {
       return JSON.parse(text)
     } catch {
-      throw new Error(`Eyes returned an unexpected response (HTTP ${response.status})`)
+      throw new Error(
+        `Eyes returned an unexpected response (HTTP ${response.status}, ${response.headers.get('Content-Type') ?? 'no content type'})`
+      )
     }
   }
 }
@@ -209,6 +239,22 @@ async function requireSuccess(response: Response, what: string): Promise<void> {
   if (response.ok) return
   await response.body?.cancel()
   throw new EyesHttpError(response.status, `Eyes returned HTTP ${response.status} ${what}`)
+}
+
+/** Reads a (decompressed) body, giving up past MAX_RESPONSE_BYTES so a gzip bomb can't exhaust memory. */
+async function readCapped(response: Response): Promise<string> {
+  if (!response.body) return ''
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+    size += chunk.byteLength
+    if (size > MAX_RESPONSE_BYTES) {
+      await response.body.cancel().catch(() => {})
+      throw new Error(`Eyes sent more than ${MAX_RESPONSE_BYTES / 1024 / 1024} MB; refusing to read it`)
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 function enc(value: string): string {

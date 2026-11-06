@@ -7,6 +7,8 @@ import path from 'node:path'
 import {ScmInfo, scmFromEvent, withOverrides} from './context.js'
 import {EyesClient} from './eyes.js'
 import {GateResult, runGate} from './gate.js'
+import {checkServerUrl} from './security.js'
+import {doctorMarkdown, runDoctor} from './doctor.js'
 import {GitHubApi, GitHubReporter, Reporter} from './github.js'
 import {mergeNotesBeforeTests, runMerge} from './merge.js'
 import {ActionInputs, readInputs} from './inputs.js'
@@ -16,8 +18,19 @@ import {visualTestsSummary} from './checks.js'
 
 export async function main(): Promise<void> {
   try {
-    const inputs = readInputs()
     const eventScm = scmFromEvent(context)
+    // Before reading inputs: a fork PR has no secrets, and "no API key" would hide the real reason.
+    if (eventScm.fork && isRunMode() && core.getInput('allowForkPullRequests').trim().toLowerCase() !== 'true') {
+      core.setFailed(
+        `Pull request #${eventScm.prNumber} comes from a fork, so its test code isn't given the Eyes key and its visual ` +
+          'tests don\'t run. A maintainer can push the branch to this repository instead, or set ' +
+          '`allowForkPullRequests: true` if the fork\'s code may have the run key.'
+      )
+      return
+    }
+    const inputs = readInputs()
+    if (inputs.mode === 'DOCTOR') return await doctor(inputs, eventScm)
+    await checkServerUrl(inputs.config.serverUrl, inputs.allowHttp)
     const scm = withOverrides(eventScm, inputs.config.scm)
     if (inputs.mode === 'REFRESH') return await refresh(inputs, scm)
     if (inputs.mode === 'MERGE') return await merge(inputs, scm)
@@ -43,7 +56,7 @@ export async function main(): Promise<void> {
 
     const result = await runGate(inputs.config, {
       runCommand: env => runCommand(inputs.run!, inputs.workingDirectory, env),
-      eyes: key => new EyesClient(inputs.config.serverUrl, key),
+      eyes: key => new EyesClient(inputs.config.serverUrl, key, inputs.config.apiKeyInQuery),
       reporter,
       log: {info: m => core.info(m), warning: m => core.warning(m)},
       env: process.env,
@@ -85,7 +98,7 @@ async function refresh(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
     inputs.config,
     {
       github: new GitHubApi(getOctokit(inputs.githubToken), scm.owner, scm.repo),
-      eyes: key => new EyesClient(inputs.config.serverUrl, key),
+      eyes: key => new EyesClient(inputs.config.serverUrl, key, inputs.config.apiKeyInQuery),
       log: {info: m => core.info(m), warning: m => core.warning(m)},
       env: process.env
     },
@@ -113,7 +126,7 @@ async function merge(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
       github: new GitHubApi(octokit, scm.owner, scm.repo),
       reporter: sha =>
         inputs.config.checks ? new GitHubReporter(octokit, scm.owner!, scm.repo!, sha, 'CHECKS') : undefined,
-      eyes: key => new EyesClient(inputs.merge.serverUrl, key),
+      eyes: key => new EyesClient(inputs.merge.serverUrl, key, inputs.config.apiKeyInQuery),
       log: {info: m => core.info(m), warning: m => core.warning(m)},
       repo: `${scm.owner}/${scm.repo}`
     },
@@ -129,6 +142,44 @@ async function merge(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
     core.debug(`Could not write the job summary: ${e}`)
   }
   if (!report.ok) core.setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`)
+}
+
+/** `mode: doctor`: setup checks in the job summary; fails the job if any fails. */
+async function doctor(inputs: ActionInputs, scm: ScmInfo): Promise<void> {
+  const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined
+  const items = await runDoctor(
+    {
+      serverUrl: inputs.config.serverUrl,
+      allowHttp: inputs.allowHttp,
+      ...inputs.keys,
+      designers: inputs.config.designers,
+      hideReviewers: inputs.config.hideReviewers
+    },
+    {
+      eyes: key => new EyesClient(inputs.config.serverUrl, key, inputs.config.apiKeyInQuery),
+      readPullRequests:
+        octokit && scm.owner && scm.repo
+          ? async () => void (await octokit.rest.pulls.list({owner: scm.owner!, repo: scm.repo!, per_page: 1}))
+          : undefined
+    }
+  )
+  for (const i of items) {
+    const line = `${i.name}: ${i.detail}`
+    if (i.status === 'ok') core.info(`✅ ${line}`)
+    else if (i.status === 'warn') core.warning(line)
+    else core.error(line)
+  }
+  try {
+    await core.summary.addRaw(doctorMarkdown(items)).write()
+  } catch (e) {
+    core.debug(`Could not write the job summary: ${e}`)
+  }
+  const failed = items.filter(i => i.status === 'fail').length
+  if (failed > 0) core.setFailed(`${failed} setup check${failed === 1 ? '' : 's'} failed; see the job summary.`)
+}
+
+function isRunMode(): boolean {
+  return (core.getInput('mode').trim() || 'run').toLowerCase() === 'run'
 }
 
 /**

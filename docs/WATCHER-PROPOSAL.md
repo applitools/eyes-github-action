@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {checks: write, pull-requests: read}
     steps:
-      - uses: applitools/visual-review-action@v0
+      - uses: applitools/eyes-github-action@v0
         with:
           mode: refresh
           readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}
@@ -81,7 +81,7 @@ jobs:
 - Re-evaluates and posts **Design review** only; no tests run. Typical job: 10-20 s, billed as 1 minute.
 - Keep the `if:` on the job, so other labels skip it without billing.
 
-### Merge: `pull_request: [closed]`
+### Merge: `pull_request: [closed]` (done 2026-11-06 as `mode: merge`; see the README)
 
 ```yaml
 on:
@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {checks: write}
     steps:
-      - uses: applitools/visual-review-action@v0
+      - uses: applitools/eyes-github-action@v0
         with:
           mode: merge
           mergeApiKey: ${{ secrets.APPLITOOLS_MERGE_KEY }}

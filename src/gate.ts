@@ -61,6 +61,10 @@ export interface GateConfig {
   designers: string[]
   designReviewByDefault: boolean
   designReviewCheck: boolean
+  /** Leave reviewers' emails out of PR results (SPEC §13a). */
+  hideReviewers?: boolean
+  /** Old on-premises servers: retry closing with the key in the query string. */
+  apiKeyInQuery?: boolean
 }
 
 export interface Logger {
@@ -255,7 +259,7 @@ export async function runGate(config: GateConfig, deps: GateDeps): Promise<GateR
  * approver lookups matter on later refreshes, once reviewers have acted in Eyes.
  */
 export async function evaluateDesign(
-  config: Pick<GateConfig, 'designers' | 'designReviewLabel'>,
+  config: Pick<GateConfig, 'designers' | 'designReviewLabel' | 'hideReviewers'>,
   inputs: DesignInputs,
   results: BatchResults,
   changed: string[],
@@ -278,7 +282,7 @@ export async function evaluateDesign(
   ) {
     for (const id of changed) approvers.set(id, await reader.sessionApprovers(results.eyesBatchId, id))
   }
-  return evaluate(required, config.designReviewLabel, results, changed, approvers, designers)
+  return evaluate(required, config.designReviewLabel, results, changed, approvers, designers, config.hideReviewers)
 }
 
 /**

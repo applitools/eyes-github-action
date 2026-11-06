@@ -5,7 +5,7 @@ import {ChangesPolicy, GateConfig, parseBool} from './gate.js'
 import {Reporting} from './github.js'
 import {MergeConfig} from './merge.js'
 
-export type Mode = 'RUN' | 'REFRESH' | 'MERGE'
+export type Mode = 'RUN' | 'REFRESH' | 'MERGE' | 'DOCTOR'
 
 export interface ActionInputs {
   mode: Mode
@@ -16,15 +16,21 @@ export interface ActionInputs {
   githubReporting: Reporting
   config: GateConfig
   merge: MergeConfig
+  /** Keys as given, for the setup check. */
+  keys: {apiKey?: string; readApiKey?: string; mergeApiKey?: string}
+  /** Plain http to a server other than this machine. */
+  allowHttp: boolean
+  /** Give fork PRs' test code the run key. */
+  allowForkPullRequests: boolean
 }
 
 export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
-  const mode = oneOf<Mode>('mode', ['RUN', 'REFRESH', 'MERGE'], 'RUN')
+  const mode = oneOf<Mode>('mode', ['RUN', 'REFRESH', 'MERGE', 'DOCTOR'], 'RUN')
   const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY
   const mergeApiKey = input('mergeApiKey') ?? env.APPLITOOLS_MERGE_KEY
-  // A refresh only reads, so the read key is enough. A merge without a key is reported on the PR, not thrown.
-  const apiKey =
-    input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : mode === 'MERGE' ? '' : undefined)
+  const runApiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY
+  // A refresh only reads, so the read key is enough. A merge or a setup check without a key reports it instead.
+  const apiKey = runApiKey ?? (mode === 'REFRESH' ? readApiKey : mode === 'RUN' ? undefined : '')
   if (apiKey === undefined) {
     throw new Error(
       mode === 'REFRESH'
@@ -38,7 +44,7 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
   const run = input('run')
   if (mode === 'RUN' && !run) throw new Error('`run` is required: the command that runs your Eyes tests.')
   const githubReporting = oneOf<Reporting>('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS')
-  if (mode !== 'RUN' && githubReporting === 'STATUSES') {
+  if ((mode === 'REFRESH' || mode === 'MERGE') && githubReporting === 'STATUSES') {
     throw new Error(
       `\`mode: ${mode.toLowerCase()}\` needs check runs (the run state lives in them); remove \`githubReporting: STATUSES\`.`
     )
@@ -79,8 +85,13 @@ export function readInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
       designReviewLabel: input('designReviewLabel') ?? 'design-review',
       designers: parseDesigners(input('designers')),
       designReviewByDefault: bool('designReviewByDefault', false),
-      designReviewCheck: bool('designReviewCheck', true)
+      designReviewCheck: bool('designReviewCheck', true),
+      hideReviewers: bool('hideReviewers', false),
+      apiKeyInQuery: bool('apiKeyInQuery', false)
     },
+    keys: {apiKey: runApiKey, readApiKey, mergeApiKey},
+    allowHttp: bool('allowHttp', false),
+    allowForkPullRequests: bool('allowForkPullRequests', false),
     // Merge key, then the run key (SPEC §11).
     merge: {serverUrl, mergeApiKey: mergeApiKey || apiKey || undefined, mergeTimeout: positiveInt('mergeTimeout') ?? 600}
   }

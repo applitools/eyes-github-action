@@ -170,8 +170,8 @@ function toMerged(pr: {
   number: number
   title: string
   merged_at: string | null
-  head: {sha: string; ref: string}
-  base: {ref: string}
+  head: {sha: string; ref: string; repo: {full_name: string} | null}
+  base: {ref: string; repo: {full_name: string}}
 }): MergedPullRequest {
   return {
     number: pr.number,
@@ -179,7 +179,8 @@ function toMerged(pr: {
     merged: pr.merged_at !== null,
     headSha: pr.head.sha,
     headRef: pr.head.ref,
-    baseRef: pr.base.ref
+    baseRef: pr.base.ref,
+    fork: pr.head.repo?.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase()
   }
 }
 

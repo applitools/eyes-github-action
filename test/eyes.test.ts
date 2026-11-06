@@ -39,10 +39,25 @@ describe('EyesClient against a fake Eyes server', () => {
     expect(eyes.requests.at(-1)).toMatchObject({method: 'DELETE', path: '/api/sessions/batches/unknown/close/bypointerid'})
   })
 
-  it('retries close with the key as a query parameter for older servers', async () => {
+  it('retries close with the key as a query parameter only when allowed (URLs get logged)', async () => {
     eyes.closeNeedsQueryKey = true
-    expect(await new EyesClient(eyes.url, 'RUN').closeBatch('sha1')).toBe(true)
+    await expect(new EyesClient(eyes.url, 'RUN').closeBatch('sha1')).rejects.toThrow('Eyes returned HTTP 401 closing batch sha1')
+    expect(eyes.requests.some(r => r.path.includes('apiKey='))).toBe(false)
+    expect(await new EyesClient(eyes.url, 'RUN', true).closeBatch('sha1')).toBe(true)
     expect(eyes.requests.at(-1)!.path).toBe('/api/sessions/batches/sha1/close/bypointerid?apiKey=RUN')
+  })
+
+  it("doesn't echo a response that isn't JSON", async () => {
+    eyes.raw.set('/api/v1/batches/sha1', {status: 200, contentType: 'text/html', body: '<h1>internal secret</h1>'})
+    await expect(new EyesClient(eyes.url, 'READ').getResults('sha1')).rejects.toThrow(
+      /^Eyes returned an unexpected response \(HTTP 200, text\/html\)$/
+    )
+  })
+
+  it('refuses a response over 16 MB, compressed or not', async () => {
+    const big = Buffer.alloc(17 * 1024 * 1024, 32)
+    eyes.raw.set('/api/v1/batches/sha1', {status: 200, contentType: 'application/json', body: big, gzip: true})
+    await expect(new EyesClient(eyes.url, 'READ').getResults('sha1')).rejects.toThrow('Eyes sent more than 16 MB')
   })
 
   it('reads runningCount until rendering is done (SPEC §10.4)', async () => {

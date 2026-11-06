@@ -9,7 +9,7 @@ branding:
 
 inputs:
   mode:
-    description: '`run` (default): run the tests and post the checks. `refresh`: run no tests; re-read Eyes for the event''s pull request, `pullRequest`, or every open PR, and update the checks that changed. `merge`: on `pull_request: closed`, merge a merged PR''s Eyes baselines into its target branch.'
+    description: '`run` (default): run the tests and post the checks. `refresh`: run no tests; re-read Eyes for the event''s pull request, `pullRequest`, or every open PR, and update the checks that changed. `merge`: on `pull_request_target: closed`, merge a merged PR''s Eyes baselines into its target branch. `doctor`: check the setup (server, keys, designers, token) and write the results to the job summary.'
     required: false
     default: 'run'
   run:
@@ -31,6 +31,18 @@ inputs:
     description: 'Seconds to wait for Eyes to merge baselines.'
     required: false
     default: '600'
+  allowHttp:
+    description: 'Allow plain http to an Eyes server other than this machine (the keys would travel unencrypted).'
+    required: false
+    default: 'false'
+  apiKeyInQuery:
+    description: 'For old on-premises Eyes servers: when closing a batch is refused, retry with the key in the URL (which servers and proxies may log).'
+    required: false
+    default: 'false'
+  allowForkPullRequests:
+    description: 'Run the tests of pull requests from forks, giving their (untrusted) test code the run key. Off by default; GitHub also withholds secrets from fork PRs on `pull_request`.'
+    required: false
+    default: 'false'
   serverUrl:
     description: 'Eyes server, for dedicated clouds and on-prem.'
     required: false
@@ -103,6 +115,10 @@ inputs:
     description: 'Post the Design review check (always, even when skipped, so it can be required).'
     required: false
     default: 'true'
+  hideReviewers:
+    description: 'Leave reviewers'' and designers'' Eyes emails out of PR results ("Approved by a designer"). Emails are public on public repositories.'
+    required: false
+    default: 'false'
   repo:
     description: 'Explicit owner/repo (default from the event).'
     required: false

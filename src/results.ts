@@ -3,6 +3,8 @@
  * (SPEC §5).
  */
 
+import {safeLink} from './security.js'
+
 export type Outcome = 'FAILED' | 'CHANGES' | 'PASSED' | 'NO_RESULTS'
 
 export const OUTCOME_LABELS: Record<Outcome, string> = {
@@ -56,14 +58,14 @@ export function parseResults(batchId: string, json: any): BatchResults {
         appName: str(t?.appName),
         environment: environment(t?.env),
         status: (str(t?.status) ?? '').toLowerCase(),
-        url: str(t?.sessionUrl)
+        url: safeLink(str(t?.sessionUrl))
       }))
     : []
   return {
     batchId,
     eyesBatchId: str(stats.id),
     name: str(stats.name),
-    url: str(json?.batchUrl),
+    url: safeLink(str(json?.batchUrl)),
     passed: int(stats.passed),
     failed: int(stats.failed),
     unresolved: int(stats.unresolved),

@@ -11,7 +11,7 @@ const prEvent: EventContext = {
     pull_request: {
       number: 7,
       title: 'New header',
-      head: {sha: 'head-sha', ref: 'feature/header'},
+      head: {sha: 'head-sha', ref: 'feature/header', repo: {full_name: 'acme/web'}},
       base: {ref: 'main'},
       labels: [{name: 'Design-Review'}, {name: 'bug'}]
     }
@@ -28,8 +28,22 @@ describe('scmFromEvent (SPEC §3.1)', () => {
       prNumber: 7,
       targetBranch: 'main',
       title: 'New header',
-      labels: ['Design-Review', 'bug']
+      labels: ['Design-Review', 'bug'],
+      fork: false
     })
+  })
+
+  it('gives fork PRs their own Eyes branch: a fork\'s main must not test against the repo\'s main', () => {
+    const fork = (repo: unknown) =>
+      scmFromEvent({...prEvent, payload: {pull_request: {...prEvent.payload.pull_request, head: {sha: 'h', ref: 'main', repo}}}})
+    expect(fork({full_name: 'mallory/web'}).fork).toBe(true)
+    expect(fork(null).fork).toBe(true)
+    expect(fork({full_name: 'ACME/web'}).fork).toBe(false)
+    expect(computeBatch(fork({full_name: 'mallory/web'}), 'wf #1').branchName).toBe('acme/web/pr-7')
+  })
+
+  it('refuses a repo override that isn\'t owner/name', () => {
+    expect(() => withOverrides({}, {repo: 'acme/web/../x'})).toThrow('`repo` must be owner/name')
   })
 
   it('reads branch builds from the ref', () => {

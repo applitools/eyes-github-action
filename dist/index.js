@@ -37446,7 +37446,11 @@ function scmFromEvent(ctx) {
             prNumber: pr.number,
             targetBranch: pr.base?.ref,
             title: pr.title,
-            labels: Array.isArray(pr.labels) ? pr.labels.map((l) => String(l?.name ?? '')) : []
+            labels: Array.isArray(pr.labels) ? pr.labels.map((l) => String(l?.name ?? '')) : [],
+            // A deleted fork has no head repository left (null).
+            fork: pr.head?.repo === null ||
+                (typeof pr.head?.repo?.full_name === 'string' &&
+                    pr.head.repo.full_name.toLowerCase() !== `${ctx.repo.owner}/${ctx.repo.repo}`.toLowerCase())
         };
     }
     return {
@@ -37460,11 +37464,12 @@ function scmFromEvent(ctx) {
 function withOverrides(scm, o) {
     const out = { ...scm };
     if (o.repo) {
+        // It goes into GitHub API paths and Eyes branch names.
+        if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(o.repo))
+            throw new Error(`\`repo\` must be owner/name, not '${o.repo}'`);
         const [owner, repo] = o.repo.split('/');
-        if (owner && repo) {
-            out.owner = owner;
-            out.repo = repo;
-        }
+        out.owner = owner;
+        out.repo = repo;
     }
     if (o.pullRequest) {
         const n = Number(o.pullRequest);
@@ -37509,7 +37514,9 @@ function computeBatch(scm, fallbackLabel, overrides = {}) {
         // No commit to key on: unique per run.
         batchId: overrides.batchId || scm.commitSha || (0,external_node_crypto_.randomUUID)(),
         batchName: overrides.batchName || defaultName,
-        branchName: overrides.branchName || (scm.branch ? prefix + scm.branch : undefined),
+        // A fork's branch can share a name with the repository's own (its main), so forks get one per PR (SPEC §3.2).
+        branchName: overrides.branchName ||
+            (scm.fork && isPullRequest(scm) ? `${prefix}pr-${scm.prNumber}` : scm.branch ? prefix + scm.branch : undefined),
         parentBranchName: overrides.parentBranchName || (scm.targetBranch ? prefix + scm.targetBranch : undefined),
         sequenceName: label
     };
@@ -37546,11 +37553,92 @@ function gateEnv(batch, apiKey, serverUrl, judgeDiffs, existing) {
     return env;
 }
 
+;// CONCATENATED MODULE: external "node:dns/promises"
+const external_node_dns_promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:dns/promises");
+// EXTERNAL MODULE: external "node:net"
+var external_node_net_ = __nccwpck_require__(7030);
+;// CONCATENATED MODULE: ./src/security.ts
+/**
+ * The security rules every implementation follows (SPEC §13a), as the Jenkins plugin's review fixed them
+ * (docs/SECURITY.md there: F2, F3, F4, F10, F12).
+ */
+
+
+/** Largest Eyes response read, before and after decompression (Eyes results for 1,000 tests are under 1 MB). */
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const METADATA_HOSTS = new Set(['169.254.169.254', 'fd00:ec2::254', 'metadata.google.internal']);
+/**
+ * Refuses an Eyes server URL the keys mustn't go to: not `https` (plain `http` only to this machine, or with
+ * `allowHttp`), user info in the URL, or a host that is or resolves to a link-local, unspecified, multicast or cloud
+ * metadata address.
+ */
+async function checkServerUrl(raw, allowHttp) {
+    let url;
+    try {
+        url = new URL(raw);
+    }
+    catch {
+        throw new Error(`serverUrl '${raw}' isn't a URL`);
+    }
+    const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (url.username || url.password)
+        throw new Error('serverUrl must not contain a user name or password');
+    if (url.protocol !== 'https:' && url.protocol !== 'http:')
+        throw new Error(`serverUrl must be https, not ${url.protocol}`);
+    if (METADATA_HOSTS.has(host))
+        throw new Error(`serverUrl must not point at a cloud metadata service (${host})`);
+    const addresses = (0,external_node_net_.isIP)(host) ? [host] : (await (0,external_node_dns_promises_namespaceObject.lookup)(host, { all: true }).catch(() => [])).map(a => a.address);
+    const bad = addresses.find(isReserved);
+    if (bad)
+        throw new Error(`serverUrl ${host} resolves to ${bad}, a reserved address the Eyes keys mustn't go to`);
+    const loopback = host === 'localhost' || (addresses.length > 0 && addresses.every(isLoopback));
+    if (url.protocol === 'http:' && !allowHttp && !loopback) {
+        throw new Error('serverUrl must be https: plain http would send the Eyes keys unencrypted. Set `allowHttp: true` to allow it.');
+    }
+}
+function isLoopback(address) {
+    return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.');
+}
+function isReserved(address) {
+    const a = address.toLowerCase().replace(/^::ffff:/, '');
+    if (METADATA_HOSTS.has(a))
+        return true;
+    if ((0,external_node_net_.isIP)(a) === 4) {
+        const [x, y] = a.split('.').map(Number);
+        return x === 0 || (x === 169 && y === 254) || (x >= 224 && x <= 239);
+    }
+    return a === '::' || /^fe[89ab]/.test(a) || a.startsWith('ff');
+}
+/** Keeps a link only if it's an absolute http(s) URL with a host, so results can't plant `javascript:` links. */
+function safeLink(value) {
+    if (!value)
+        return undefined;
+    try {
+        const url = new URL(value.trim());
+        if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname)
+            return undefined;
+        // Parentheses would end a Markdown link early.
+        return url.toString().replace(/\(/g, '%28').replace(/\)/g, '%29');
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
+ * Shows text from test code (test, batch and environment names) as plain text in Markdown: a PR author controls it, so
+ * it mustn't add links, images or HTML.
+ */
+function markdownText(text) {
+    // Escaping brackets is enough to stop links and images; names never start a line, so # and + stay as they are.
+    return text.replace(/\r?\n/g, ' ').replace(/[\\`*_[\]<>|~]/g, c => `\\${c}`);
+}
+
 ;// CONCATENATED MODULE: ./src/results.ts
 /**
  * One Eyes batch's results, as returned by `GET /api/v1/batches/{pointerId}` (SPEC §10.3), and the gate's outcome
  * (SPEC §5).
  */
+
 const OUTCOME_LABELS = {
     FAILED: 'Failed',
     CHANGES: 'Changes to review',
@@ -37570,14 +37658,14 @@ function parseResults(batchId, json) {
             appName: str(t?.appName),
             environment: environment(t?.env),
             status: (str(t?.status) ?? '').toLowerCase(),
-            url: str(t?.sessionUrl)
+            url: safeLink(str(t?.sessionUrl))
         }))
         : [];
     return {
         batchId,
         eyesBatchId: str(stats.id),
         name: str(stats.name),
-        url: str(json?.batchUrl),
+        url: safeLink(str(json?.batchUrl)),
         passed: results_int(stats.passed),
         failed: results_int(stats.failed),
         unresolved: results_int(stats.unresolved),
@@ -37674,6 +37762,7 @@ function applyExpectations(expect, results) {
  * fetch asks for gzip and decompresses on its own (Eyes JSON shrinks ~6x).
  */
 
+
 const TIMEOUT_MS = 30_000;
 const API_KEY_HEADER = 'X-Eyes-Api-Key';
 class EyesHttpError extends Error {
@@ -37690,9 +37779,13 @@ class EyesHttpError extends Error {
 }
 class EyesClient {
     apiKey;
+    apiKeyInQuery;
     serverUrl;
-    constructor(serverUrl, apiKey) {
+    constructor(serverUrl, apiKey, 
+    /** Retry closing with the key in the query string, for old on-premises servers (opt-in: URLs get logged). */
+    apiKeyInQuery = false) {
         this.apiKey = apiKey;
+        this.apiKeyInQuery = apiKeyInQuery;
         this.serverUrl = serverUrl.replace(/\/+$/, '');
     }
     /**
@@ -37704,7 +37797,7 @@ class EyesClient {
     async closeBatch(batchId) {
         const path = `/api/sessions/batches/${enc(batchId)}/close/bypointerid`;
         let response = await this.send('DELETE', path);
-        if (response.status === 401) {
+        if (response.status === 401 && this.apiKeyInQuery) {
             // Older or on-prem servers may only accept the key as a query parameter on this endpoint.
             response = await this.send('DELETE', `${path}?apiKey=${enc(this.apiKey)}`, false);
         }
@@ -37786,6 +37879,25 @@ class EyesClient {
         }
         return users;
     }
+    /** Reads a batch that can't exist (SPEC §10.8): 404 means the key may read results, 403 not, 401 it's invalid. */
+    async checkRead() {
+        const response = await this.send('GET', '/api/sessions/batches/applitools-gate-setup-check/bypointerid');
+        await response.body?.cancel();
+        return response.status === 401 ? 'INVALID' : response.status === 403 ? 'NOT_ALLOWED' : 'ALLOWED';
+    }
+    /**
+     * Requests a real merge of two branches that can't exist, so nothing changes (SPEC §10.8): 202 or 404 means the key
+     * may merge. A check-only merge isn't a probe: read keys may check.
+     */
+    async checkMerge() {
+        const query = `SourceBranch=${enc('applitools-gate-setup-check/nonexistent/source')}` +
+            `&TargetBranch=${enc('applitools-gate-setup-check/nonexistent/target')}&OnlyCheck=false`;
+        const response = await this.send('POST', `/api/baselines/branches/merge?${query}`);
+        await response.body?.cancel();
+        if (response.status === 401)
+            return 'INVALID';
+        return response.status === 202 || response.status === 404 ? 'ALLOWED' : 'NOT_ALLOWED';
+    }
     /**
      * Starts merging one baseline branch into another, both `owner/repo/branch` (SPEC §10.7). Needs a merge key.
      *
@@ -37845,13 +37957,14 @@ class EyesClient {
             throw new Error(`couldn't reach Eyes at ${this.serverUrl}: ${causeMessage(e)}`);
         }
     }
+    /** Never echoes the response: the server may not be Eyes, and errors reach logs and PR checks. */
     async json(response) {
-        const text = await response.text();
+        const text = await readCapped(response);
         try {
             return JSON.parse(text);
         }
         catch {
-            throw new Error(`Eyes returned an unexpected response (HTTP ${response.status})`);
+            throw new Error(`Eyes returned an unexpected response (HTTP ${response.status}, ${response.headers.get('Content-Type') ?? 'no content type'})`);
         }
     }
 }
@@ -37860,6 +37973,22 @@ async function requireSuccess(response, what) {
         return;
     await response.body?.cancel();
     throw new EyesHttpError(response.status, `Eyes returned HTTP ${response.status} ${what}`);
+}
+/** Reads a (decompressed) body, giving up past MAX_RESPONSE_BYTES so a gzip bomb can't exhaust memory. */
+async function readCapped(response) {
+    if (!response.body)
+        return '';
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+        size += chunk.byteLength;
+        if (size > MAX_RESPONSE_BYTES) {
+            await response.body.cancel().catch(() => { });
+            throw new Error(`Eyes sent more than ${MAX_RESPONSE_BYTES / 1024 / 1024} MB; refusing to read it`);
+        }
+        chunks.push(chunk);
+    }
+    return Buffer.concat(chunks).toString('utf8');
 }
 function enc(value) {
     return encodeURIComponent(value);
@@ -37975,7 +38104,9 @@ function isForced(inputs) {
  * @param changedTestIds tests that had visual changes when the run finished
  * @param approvers for each changed test that's now accepted, who accepted it (only needed with designers)
  */
-function evaluate(required, label, results, changedTestIds, approvers, designers) {
+function evaluate(required, label, results, changedTestIds, approvers, designers, 
+/** Leave reviewers' and designers' emails out: they're public on public repositories. */
+hideReviewers = false) {
     if (!required) {
         return {
             state: 'NOT_REQUESTED',
@@ -38035,14 +38166,16 @@ function evaluate(required, label, results, changedTestIds, approvers, designers
         return {
             state: 'WAITING',
             title: 'Waiting for a designer',
-            detail: `Changes were accepted${others.length === 0 ? '' : ` by ${others.join(', ')}`}` +
-                `, but a designer (${describe(designers)}) must approve them.` +
-                (designers.problem ? ` Note: ${designers.problem}.` : '')
+            detail: hideReviewers
+                ? 'Changes were accepted, but a designer must approve them.'
+                : `Changes were accepted${others.length === 0 ? '' : ` by ${others.join(', ')}`}` +
+                    `, but a designer (${describe(designers)}) must approve them.` +
+                    (designers.problem ? ` Note: ${designers.problem}.` : '')
         };
     }
     return {
         state: 'APPROVED',
-        title: `Approved by ${[...approvedBy].sort().join(', ')}`,
+        title: hideReviewers ? 'Approved by a designer' : `Approved by ${[...approvedBy].sort().join(', ')}`,
         detail: 'Every visual change was accepted by a designer.'
     };
 }
@@ -38055,6 +38188,7 @@ function plural(n, noun) {
 }
 
 ;// CONCATENATED MODULE: ./src/checks.ts
+
 
 const VISUAL_TESTS = 'Applitools / Visual tests';
 const DESIGN_REVIEW = 'Applitools / Design review';
@@ -38178,9 +38312,9 @@ function statusBadge(status) {
             return status;
     }
 }
-/** Keeps names from breaking the markdown table. */
+/** Names come from test code: plain text only, and they mustn't break the table. */
 function checks_escape(text) {
-    return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    return markdownText(text);
 }
 
 ;// CONCATENATED MODULE: ./src/state.ts
@@ -38231,7 +38365,7 @@ async function runMerge(config, deps, prNumber) {
         .sort((a, b) => b.id - a.id)
         .map(c => decodeState(c.summary))
         .find(s => s !== undefined);
-    const source = state?.branchName ?? `${deps.repo}/${pr.headRef}`;
+    const source = state?.branchName ?? `${deps.repo}/${pr.fork ? `pr-${pr.number}` : pr.headRef}`;
     const target = `${deps.repo}/${pr.baseRef}`;
     const how = `Eyes baseline branch \`${source}\` → \`${target}\``;
     const fixThenRetry = `\n\nOnce that's fixed, re-run this job to retry, or merge by hand in Eyes under **Compare & merge branches** ` +
@@ -38526,7 +38660,7 @@ async function evaluateDesign(config, inputs, results, changed, reader) {
         for (const id of changed)
             approvers.set(id, await reader.sessionApprovers(results.eyesBatchId, id));
     }
-    return evaluate(required, config.designReviewLabel, results, changed, approvers, designers);
+    return evaluate(required, config.designReviewLabel, results, changed, approvers, designers, config.hideReviewers);
 }
 /**
  * A key without `execute` can't upload tests (Eyes answers 403 to the SDK), which otherwise only shows up as "no
@@ -38620,6 +38754,125 @@ function parseBool(value) {
 }
 function message(e) {
     return e instanceof Error ? e.message : String(e);
+}
+
+;// CONCATENATED MODULE: ./src/doctor.ts
+/**
+ * Setup checks (SPEC §13), the Action's version of the Jenkins plugin's setup page: is the Eyes server allowed and
+ * reachable, can each key do its job, do the designers resolve, can the token read pull requests. Every problem comes
+ * with the fix. Nothing changes in Eyes or GitHub.
+ */
+
+
+
+async function runDoctor(config, deps) {
+    const items = [];
+    const add = (name, status, detail) => items.push({ name, status, detail });
+    try {
+        await checkServerUrl(config.serverUrl, config.allowHttp);
+    }
+    catch (e) {
+        add('Eyes server', 'fail', `${doctor_message(e)}.`);
+        return items;
+    }
+    // Run key: also tells whether the server answers at all.
+    if (!config.apiKey) {
+        add('Run key', 'fail', 'Missing. Add your Eyes run key as the secret `APPLITOOLS_API_KEY` and pass it as `apiKey`.');
+    }
+    else {
+        try {
+            const { permissions } = await deps.eyes(config.apiKey).keyInfo();
+            add('Eyes server', 'ok', `${config.serverUrl} answers.`);
+            if (permissions.length > 0 && !permissions.includes('execute')) {
+                add('Run key', 'fail', `It has ${permissions.join(', ')} permission, so Eyes refuses its test uploads. Use a key with execute permission.`);
+            }
+            else {
+                add('Run key', 'ok', permissions.length > 0 ? `Permissions: ${permissions.join(', ')}.` : 'Valid.');
+            }
+        }
+        catch (e) {
+            if (e instanceof EyesHttpError && e.unauthorized) {
+                add('Eyes server', 'ok', `${config.serverUrl} answers.`);
+                add('Run key', 'fail', `Eyes doesn't accept it (HTTP ${e.status}). Check the \`APPLITOOLS_API_KEY\` secret, and \`serverUrl\` for a dedicated cloud.`);
+            }
+            else {
+                add('Eyes server', 'fail', `${doctor_message(e)}. Check \`serverUrl\`.`);
+                return items;
+            }
+        }
+    }
+    const readKey = config.readApiKey ?? config.apiKey;
+    if (readKey) {
+        const fallback = config.readApiKey ? '' : ' (no `readApiKey`, so this is the run key)';
+        const read = await probe(() => deps.eyes(readKey).checkRead());
+        if (read === 'ALLOWED')
+            add('Read key', 'ok', `Can read results${fallback}.`);
+        else {
+            add('Read key', 'fail', `${read === 'INVALID' ? "Eyes doesn't accept it" : "It can't read results"}${fallback}. Add an Eyes read key as the ` +
+                'secret `APPLITOOLS_READ_KEY` and pass it as `readApiKey`.' +
+                (read instanceof Error ? ` (${read.message})` : ''));
+        }
+    }
+    const mergeKey = config.mergeApiKey ?? config.apiKey;
+    if (mergeKey) {
+        const fallback = config.mergeApiKey ? '' : ' (no `mergeApiKey`, so this is the run key)';
+        const merge = await probe(() => deps.eyes(mergeKey).checkMerge());
+        if (merge === 'ALLOWED')
+            add('Merge key', 'ok', `Can merge baselines${fallback}.`);
+        else {
+            add('Merge key', 
+            // Only the merge workflow needs it.
+            config.mergeApiKey ? 'fail' : 'warn', `${merge === 'INVALID' ? "Eyes doesn't accept it" : "It can't merge baselines"}${fallback}, so merged PRs' baselines ` +
+                "won't be merged. Eyes merge keys are created for a team and a user; add one as the secret " +
+                '`APPLITOOLS_MERGE_KEY` and pass it as `mergeApiKey` to the merge workflow.' +
+                (merge instanceof Error ? ` (${merge.message})` : ''));
+        }
+    }
+    if (config.designers.length === 0) {
+        add('Designers', 'ok', 'None set: anyone who reviews in Eyes can approve design review.');
+    }
+    else if (readKey) {
+        const resolved = await resolveDesigners(config.designers, () => deps.eyes(readKey).ownTeams());
+        const who = config.hideReviewers
+            ? `${resolved.allowed.size} designer${resolved.allowed.size === 1 ? '' : 's'}`
+            : [...resolved.allowed].sort().join(', ') || 'nobody';
+        if (resolved.allowed.size === 0) {
+            add('Designers', 'fail', `Nobody can approve: ${resolved.problem ?? 'no designers resolved'}. Check the team names in Eyes.`);
+        }
+        else if (resolved.problem) {
+            add('Designers', 'warn', `${who}. But ${resolved.problem}.`);
+        }
+        else {
+            add('Designers', 'ok', `${who}${config.designers.some(isTeam) ? ' (Eyes teams resolved with the read key)' : ''}.`);
+        }
+    }
+    if (deps.readPullRequests) {
+        try {
+            await deps.readPullRequests();
+            add('GitHub', 'ok', 'The token can read pull requests. Posting checks needs `checks: write` in the workflow\'s `permissions`; ' +
+                "that can't be checked without posting one, so the first run reports it if it's missing.");
+        }
+        catch (e) {
+            add('GitHub', 'fail', `The token can't read pull requests (${doctor_message(e)}). Add \`pull-requests: read\` to the workflow's \`permissions\`.`);
+        }
+    }
+    return items;
+}
+function doctorMarkdown(items) {
+    const icon = { ok: '✅', warn: '⚠️', fail: '❌' };
+    const rows = items.map(i => `| ${icon[i.status]} ${i.name} | ${i.detail.replace(/\|/g, '\\|')} |`);
+    return `## Applitools setup check\n\n| Check | Result |\n| --- | --- |\n${rows.join('\n')}\n`;
+}
+async function probe(fn) {
+    try {
+        return await fn();
+    }
+    catch (e) {
+        return e instanceof Error ? e : new Error(String(e));
+    }
+}
+function doctor_message(e) {
+    return (e instanceof Error ? e.message : String(e)).replace(/\.$/, '');
 }
 
 ;// CONCATENATED MODULE: ./src/github.ts
@@ -38786,7 +39039,8 @@ function toMerged(pr) {
         merged: pr.merged_at !== null,
         headSha: pr.head.sha,
         headRef: pr.head.ref,
-        baseRef: pr.base.ref
+        baseRef: pr.base.ref,
+        fork: pr.head.repo?.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase()
     };
 }
 /** Check summaries are limited to 65535 characters. */
@@ -38809,11 +39063,12 @@ function describeError(e) {
 
 
 function readInputs(env = process.env) {
-    const mode = oneOf('mode', ['RUN', 'REFRESH', 'MERGE'], 'RUN');
+    const mode = oneOf('mode', ['RUN', 'REFRESH', 'MERGE', 'DOCTOR'], 'RUN');
     const readApiKey = input('readApiKey') ?? env.APPLITOOLS_READ_KEY;
     const mergeApiKey = input('mergeApiKey') ?? env.APPLITOOLS_MERGE_KEY;
-    // A refresh only reads, so the read key is enough. A merge without a key is reported on the PR, not thrown.
-    const apiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY ?? (mode === 'REFRESH' ? readApiKey : mode === 'MERGE' ? '' : undefined);
+    const runApiKey = input('apiKey') ?? env.APPLITOOLS_API_KEY;
+    // A refresh only reads, so the read key is enough. A merge or a setup check without a key reports it instead.
+    const apiKey = runApiKey ?? (mode === 'REFRESH' ? readApiKey : mode === 'RUN' ? undefined : '');
     if (apiKey === undefined) {
         throw new Error(mode === 'REFRESH'
             ? 'No Eyes read key. Pass `readApiKey: ${{ secrets.APPLITOOLS_READ_KEY }}` to the action.'
@@ -38827,7 +39082,7 @@ function readInputs(env = process.env) {
     if (mode === 'RUN' && !run)
         throw new Error('`run` is required: the command that runs your Eyes tests.');
     const githubReporting = oneOf('githubReporting', ['CHECKS', 'STATUSES'], 'CHECKS');
-    if (mode !== 'RUN' && githubReporting === 'STATUSES') {
+    if ((mode === 'REFRESH' || mode === 'MERGE') && githubReporting === 'STATUSES') {
         throw new Error(`\`mode: ${mode.toLowerCase()}\` needs check runs (the run state lives in them); remove \`githubReporting: STATUSES\`.`);
     }
     const serverUrl = input('serverUrl') ?? env.APPLITOOLS_SERVER_URL ?? 'https://eyes.applitools.com';
@@ -38865,8 +39120,13 @@ function readInputs(env = process.env) {
             designReviewLabel: input('designReviewLabel') ?? 'design-review',
             designers: parseDesigners(input('designers')),
             designReviewByDefault: bool('designReviewByDefault', false),
-            designReviewCheck: bool('designReviewCheck', true)
+            designReviewCheck: bool('designReviewCheck', true),
+            hideReviewers: bool('hideReviewers', false),
+            apiKeyInQuery: bool('apiKeyInQuery', false)
         },
+        keys: { apiKey: runApiKey, readApiKey, mergeApiKey },
+        allowHttp: bool('allowHttp', false),
+        allowForkPullRequests: bool('allowForkPullRequests', false),
         // Merge key, then the run key (SPEC §11).
         merge: { serverUrl, mergeApiKey: mergeApiKey || apiKey || undefined, mergeTimeout: positiveInt('mergeTimeout') ?? 600 }
     };
@@ -39042,10 +39302,22 @@ function refresh_message(e) {
 
 
 
+
+
 async function main() {
     try {
-        const inputs = readInputs();
         const eventScm = scmFromEvent(github_context);
+        // Before reading inputs: a fork PR has no secrets, and "no API key" would hide the real reason.
+        if (eventScm.fork && isRunMode() && getInput('allowForkPullRequests').trim().toLowerCase() !== 'true') {
+            setFailed(`Pull request #${eventScm.prNumber} comes from a fork, so its test code isn't given the Eyes key and its visual ` +
+                'tests don\'t run. A maintainer can push the branch to this repository instead, or set ' +
+                '`allowForkPullRequests: true` if the fork\'s code may have the run key.');
+            return;
+        }
+        const inputs = readInputs();
+        if (inputs.mode === 'DOCTOR')
+            return await doctor(inputs, eventScm);
+        await checkServerUrl(inputs.config.serverUrl, inputs.allowHttp);
         const scm = withOverrides(eventScm, inputs.config.scm);
         if (inputs.mode === 'REFRESH')
             return await refresh(inputs, scm);
@@ -39067,7 +39339,7 @@ async function main() {
         }
         const result = await runGate(inputs.config, {
             runCommand: env => runCommand(inputs.run, inputs.workingDirectory, env),
-            eyes: key => new EyesClient(inputs.config.serverUrl, key),
+            eyes: key => new EyesClient(inputs.config.serverUrl, key, inputs.config.apiKeyInQuery),
             reporter,
             log: { info: m => info(m), warning: m => warning(m) },
             env: process.env,
@@ -39103,7 +39375,7 @@ async function refresh(inputs, scm) {
         throw new Error('Repository unknown; set `repo:`.');
     const outcomes = await runRefresh(inputs.config, {
         github: new GitHubApi(getOctokit(inputs.githubToken), scm.owner, scm.repo),
-        eyes: key => new EyesClient(inputs.config.serverUrl, key),
+        eyes: key => new EyesClient(inputs.config.serverUrl, key, inputs.config.apiKeyInQuery),
         log: { info: m => info(m), warning: m => warning(m) },
         env: process.env
     }, scm.prNumber);
@@ -39128,7 +39400,7 @@ async function main_merge(inputs, scm) {
     const report = await runMerge(inputs.merge, {
         github: new GitHubApi(octokit, scm.owner, scm.repo),
         reporter: sha => inputs.config.checks ? new GitHubReporter(octokit, scm.owner, scm.repo, sha, 'CHECKS') : undefined,
-        eyes: key => new EyesClient(inputs.merge.serverUrl, key),
+        eyes: key => new EyesClient(inputs.merge.serverUrl, key, inputs.config.apiKeyInQuery),
         log: { info: m => info(m), warning: m => warning(m) },
         repo: `${scm.owner}/${scm.repo}`
     }, scm.prNumber);
@@ -39145,6 +39417,43 @@ async function main_merge(inputs, scm) {
     }
     if (!report.ok)
         setFailed(`${report.title}: see the Applitools / Baseline merge check on PR #${report.pr}`);
+}
+/** `mode: doctor`: setup checks in the job summary; fails the job if any fails. */
+async function doctor(inputs, scm) {
+    const octokit = inputs.githubToken ? getOctokit(inputs.githubToken) : undefined;
+    const items = await runDoctor({
+        serverUrl: inputs.config.serverUrl,
+        allowHttp: inputs.allowHttp,
+        ...inputs.keys,
+        designers: inputs.config.designers,
+        hideReviewers: inputs.config.hideReviewers
+    }, {
+        eyes: key => new EyesClient(inputs.config.serverUrl, key, inputs.config.apiKeyInQuery),
+        readPullRequests: octokit && scm.owner && scm.repo
+            ? async () => void (await octokit.rest.pulls.list({ owner: scm.owner, repo: scm.repo, per_page: 1 }))
+            : undefined
+    });
+    for (const i of items) {
+        const line = `${i.name}: ${i.detail}`;
+        if (i.status === 'ok')
+            info(`✅ ${line}`);
+        else if (i.status === 'warn')
+            warning(line);
+        else
+            error(line);
+    }
+    try {
+        await summary.addRaw(doctorMarkdown(items)).write();
+    }
+    catch (e) {
+        core_debug(`Could not write the job summary: ${e}`);
+    }
+    const failed = items.filter(i => i.status === 'fail').length;
+    if (failed > 0)
+        setFailed(`${failed} setup check${failed === 1 ? '' : 's'} failed; see the job summary.`);
+}
+function isRunMode() {
+    return (getInput('mode').trim() || 'run').toLowerCase() === 'run';
 }
 /**
  * Runs the user's command with bash, like a `run:` step (`bash --noprofile --norc -eo pipefail`). Action inputs

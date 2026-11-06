@@ -41,6 +41,8 @@ export class FakeEyes {
   mergeResult = {merged: true, conflicts: 0, changes: 2}
   mergeRunning = 0
   teams: {id: string; name: string; members: Record<string, object>}[] = []
+  /** Canned responses by path, for hostile-server tests. */
+  readonly raw = new Map<string, {status: number; contentType: string; body: string | Buffer; gzip?: boolean}>()
   /** Only accept the key as a query parameter on close (older servers). */
   closeNeedsQueryKey = false
   private server?: Server
@@ -81,6 +83,13 @@ export class FakeEyes {
       res.end(gzip ? gzipSync(json) : json)
     }
     if (!key) return send(401, {message: 'Unauthorized'})
+    const raw = this.raw.get(url.pathname)
+    if (raw) {
+      const body = raw.gzip ? gzipSync(raw.body) : raw.body
+      res.writeHead(raw.status, {'Content-Type': raw.contentType, ...(raw.gzip ? {'Content-Encoding': 'gzip'} : {})})
+      res.end(body)
+      return
+    }
 
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
     // DELETE /api/sessions/batches/{pointer}/close/bypointerid

@@ -17,6 +17,8 @@ export interface ScmInfo {
   title?: string
   /** PR label names, from the event payload. */
   labels?: string[]
+  /** The PR comes from a fork, so its test code is untrusted (SPEC §13a). */
+  fork?: boolean
 }
 
 /** The parts of `@actions/github`'s context this needs (kept narrow so tests can pass plain objects). */
@@ -47,7 +49,12 @@ export function scmFromEvent(ctx: EventContext): ScmInfo {
       prNumber: pr.number,
       targetBranch: pr.base?.ref,
       title: pr.title,
-      labels: Array.isArray(pr.labels) ? pr.labels.map((l: {name?: string}) => String(l?.name ?? '')) : []
+      labels: Array.isArray(pr.labels) ? pr.labels.map((l: {name?: string}) => String(l?.name ?? '')) : [],
+      // A deleted fork has no head repository left (null).
+      fork:
+        pr.head?.repo === null ||
+        (typeof pr.head?.repo?.full_name === 'string' &&
+          pr.head.repo.full_name.toLowerCase() !== `${ctx.repo.owner}/${ctx.repo.repo}`.toLowerCase())
     }
   }
   return {
@@ -62,11 +69,11 @@ export function scmFromEvent(ctx: EventContext): ScmInfo {
 export function withOverrides(scm: ScmInfo, o: ScmOverrides): ScmInfo {
   const out = {...scm}
   if (o.repo) {
+    // It goes into GitHub API paths and Eyes branch names.
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(o.repo)) throw new Error(`\`repo\` must be owner/name, not '${o.repo}'`)
     const [owner, repo] = o.repo.split('/')
-    if (owner && repo) {
-      out.owner = owner
-      out.repo = repo
-    }
+    out.owner = owner
+    out.repo = repo
   }
   if (o.pullRequest) {
     const n = Number(o.pullRequest)
@@ -125,7 +132,10 @@ export function computeBatch(scm: ScmInfo, fallbackLabel: string, overrides: Bat
     // No commit to key on: unique per run.
     batchId: overrides.batchId || scm.commitSha || randomUUID(),
     batchName: overrides.batchName || defaultName,
-    branchName: overrides.branchName || (scm.branch ? prefix + scm.branch : undefined),
+    // A fork's branch can share a name with the repository's own (its main), so forks get one per PR (SPEC §3.2).
+    branchName:
+      overrides.branchName ||
+      (scm.fork && isPullRequest(scm) ? `${prefix}pr-${scm.prNumber}` : scm.branch ? prefix + scm.branch : undefined),
     parentBranchName: overrides.parentBranchName || (scm.targetBranch ? prefix + scm.targetBranch : undefined),
     sequenceName: label
   }

@@ -118,6 +118,13 @@ describe('evaluate (SPEC §6.2, first match wins)', () => {
     })
   })
 
+  it('names nobody with hideReviewers (emails are public on public repositories)', () => {
+    const approvers = new Map([['s1', new Set(['dana@example.com'])], ['s2', new Set(['dev@example.com'])]])
+    expect(evaluate(true, 'l', accepted, ['s1'], approvers, dana, true).title).toBe('Approved by a designer')
+    const waiting = evaluate(true, 'l', accepted, ['s1', 's2'], approvers, dana, true)
+    expect(waiting.detail).toBe('Changes were accepted, but a designer must approve them.')
+  })
+
   it('8: no approvals recorded yet', () => {
     expect(evaluate(true, 'l', accepted, ['s1'], none, dana).detail).toBe(
       'Changes were accepted, but a designer (Dana@Example.com) must approve them.'
